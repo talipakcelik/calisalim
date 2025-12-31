@@ -3,12 +3,12 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 const geistSans = Inter({
-  variable: "--font-geist-sans", // isim ayn kalsn
+  variable: "--font-geist-sans", // isim ayný kalsýn
   subsets: ["latin", "latin-ext"],
 });
 
 const geistMono = JetBrains_Mono({
-  variable: "--font-geist-mono", // isim ayn kalsn
+  variable: "--font-geist-mono", // isim ayný kalsýn
   subsets: ["latin", "latin-ext"],
 });
 
