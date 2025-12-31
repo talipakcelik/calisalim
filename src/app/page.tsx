@@ -496,9 +496,9 @@ export default function EnhancedApp() {
               <div className="bg-primary text-primary-foreground p-2 rounded-xl">
                 <Timer className="h-6 w-6" />
               </div>
-              Çalışalım
+              Chronos
             </h1>
-            <p className="text-muted-foreground mt-1"></p>
+            <p className="text-muted-foreground mt-1">Zamanını yönet, üretkenliğini artır.</p>
           </div>
 
           <div className="flex gap-2 items-center">
@@ -828,7 +828,7 @@ export default function EnhancedApp() {
                                                 <Tooltip 
                                                     cursor={{ fill: '#F1F5F9' }}
                                                     contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
-                                                    formatter={(value: number) => [`${value} Saat`, 'Süre']}
+                                                    formatter={(value: any) => [`${value} Saat`, 'Süre']}
                                                 />
                                                 <Bar 
                                                     dataKey="saat" 
