@@ -151,6 +151,12 @@ export default function EnhancedApp() {
   // Derived Data
   const categoryMap = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
 
+  // STABILITY FIX: State verilerini Ref içinde tutarak callback'lerin sürekli yeniden oluşmasını engelliyoruz.
+  const stateRef = useRef({ categories, sessions, dailyTarget, localUpdatedAt });
+  useEffect(() => {
+    stateRef.current = { categories, sessions, dailyTarget, localUpdatedAt };
+  }, [categories, sessions, dailyTarget, localUpdatedAt]);
+
   // .env.local SYNC: Eğer ortam değişkenleri varsa ve config boşsa otomatik doldur
   useEffect(() => {
     const envUrl = getEnvVar("NEXT_PUBLIC_SUPABASE_URL");
@@ -194,7 +200,11 @@ export default function EnhancedApp() {
       if (window.supabase) {
         initSupabase();
       } else {
+        // Prevent duplicate script injection
+        if (document.getElementById("supabase-js")) return;
+        
         const script = document.createElement("script");
+        script.id = "supabase-js";
         script.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
         script.async = true;
         script.onload = initSupabase;
@@ -247,9 +257,13 @@ export default function EnhancedApp() {
   };
 
   // --- Logic: Cloud Sync ---
+  // STABILITY FIX: Dependencies array is now stable (only [supabase]), preventing auth listener loops
   const pushToCloud = useCallback(async (currentUser: User, label?: string) => {
     if (!supabase) return;
     setCloudStatus("syncing");
+    
+    // Read directly from Ref to avoid dependency change
+    const { categories, sessions, dailyTarget } = stateRef.current;
     
     const snapshot: Snapshot = { categories, sessions, dailyTarget };
     const nowIso = new Date().toISOString();
@@ -266,8 +280,9 @@ export default function EnhancedApp() {
         setCloudStatus("signed_in");
         setCloudMsg(label ? `Senkronlandı (${label})` : "Senkronlandı");
     }
-  }, [supabase, categories, sessions, dailyTarget]);
+  }, [supabase]); 
 
+  // STABILITY FIX: Dependencies array is now stable
   const loadFromCloud = useCallback(async (currentUser: User) => {
     if (!supabase) return;
     setCloudStatus("syncing");
@@ -291,6 +306,7 @@ export default function EnhancedApp() {
     }
 
     const remoteMs = data?.updated_at ? Date.parse(data.updated_at) : 0;
+    const { localUpdatedAt } = stateRef.current;
     
     // Eğer buluttaki veri yerelden daha yeniyse güncelle
     if (data?.data && remoteMs > localUpdatedAt) {
@@ -315,9 +331,10 @@ export default function EnhancedApp() {
             setCloudMsg("Senkronize");
         }
     }
-  }, [supabase, localUpdatedAt, pushToCloud, setCategories, setSessions, setDailyTarget, setLocalUpdatedAt]);
+  }, [supabase, pushToCloud, setCategories, setSessions, setDailyTarget, setLocalUpdatedAt]);
 
   // Auth Listener
+  // STABILITY FIX: This useEffect now relies on stable callbacks, so it won't tear down on every state change.
   useEffect(() => {
     if (!supabase || !catsHydrated || !sessionsHydrated) return;
 
