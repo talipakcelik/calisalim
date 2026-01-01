@@ -11,7 +11,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 
 import {
@@ -29,8 +36,15 @@ import {
   Filter,
   Loader2,
   BarChart3,
-  Calendar,
-  PieChart,
+  Calendar as CalendarIcon,
+  PieChart as PieChartIcon,
+  MoreVertical,
+  Target,
+  Flame,
+  Plus,
+  Pencil,
+  X,
+  Palette,
 } from "lucide-react";
 
 import {
@@ -43,6 +57,10 @@ import {
   YAxis,
   AreaChart,
   Area,
+  PieChart as RechartsPieChart,
+  Pie,
+  Cell,
+  Legend,
 } from "recharts";
 
 /** ========= Types ========= */
@@ -51,22 +69,17 @@ type Session = { id: string; categoryId: string; label: string; start: number; e
 type Running = { categoryId: string; label: string; start: number };
 type Snapshot = { categories: Category[]; sessions: Session[]; dailyTarget: number };
 type CloudStatus = "disabled" | "signed_out" | "signed_in" | "syncing" | "error";
+type RangeFilter = "all" | "today" | "week";
 
 /** ========= Defaults ========= */
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: "phd", name: "PhD / Tez", color: "bg-indigo-500" },
-  { id: "work", name: "İş", color: "bg-blue-500" },
-  { id: "reading", name: "Okuma", color: "bg-emerald-500" },
-  { id: "sport", name: "Spor", color: "bg-rose-500" },
-  { id: "social", name: "Sosyal", color: "bg-amber-500" },
-  { id: "other", name: "Diğer", color: "bg-slate-500" },
+  { id: "phd", name: "PhD / Tez", color: "#6366f1" }, // Tailwind renkleri yerine Hex tutmak daha kolay yönetilir
+  { id: "work", name: "İş", color: "#3b82f6" },
+  { id: "reading", name: "Okuma", color: "#10b981" },
+  { id: "sport", name: "Spor", color: "#f43f5e" },
+  { id: "social", name: "Sosyal", color: "#f59e0b" },
+  { id: "other", name: "Diğer", color: "#64748b" },
 ];
-
-/** ========= Storage keys (v2) ========= */
-const LS_CATEGORIES = "talip-v2.categories";
-const LS_SESSIONS = "talip-v2.sessions";
-const LS_TARGET = "talip-v2.target";
-const LS_UPDATED_AT = "talip-v2.updatedAt";
 
 /** ========= Helpers ========= */
 const uid = () =>
@@ -74,15 +87,8 @@ const uid = () =>
     ? crypto.randomUUID()
     : `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
 
-const safeParse = <T,>(raw: string | null, fallback: T): T => {
-  try {
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-};
-
 const pad2 = (n: number) => String(n).padStart(2, "0");
+
 const fmtTime = (ms: number) => {
   const d = new Date(ms);
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
@@ -96,10 +102,52 @@ const fmtDuration = (ms: number) => {
   return `${m}dk ${s % 60}sn`;
 };
 
+const fmtCompact = (ms: number) => {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hh = Math.floor(totalSeconds / 3600);
+  const mm = Math.floor((totalSeconds % 3600) / 60);
+  const ss = totalSeconds % 60;
+  if (hh > 0) return `${hh}:${pad2(mm)}`;
+  return `${mm}:${pad2(ss)}`;
+};
+
+/** Unified human time format */
+const fmtHmFromMs = (ms: number) => {
+  const totalMin = Math.max(0, Math.round(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+
+  if (h <= 0) return `${m} dk`;
+  if (m === 0) return `${h} saat`;
+  return `${h} saat ${m} dk`;
+};
+
+const fmtHmFromHours = (hours: number) => fmtHmFromMs(Math.round(hours * 3600000));
+
 const startOfDayMs = (d: Date) => {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
   return x.getTime();
+};
+
+const startOfWeekMs = (d: Date) => {
+  const x = new Date(d);
+  const day = x.getDay();
+  const diff = x.getDate() - day + (day === 0 ? -6 : 1);
+  x.setDate(diff);
+  x.setHours(0, 0, 0, 0);
+  return x.getTime();
+};
+
+/** Datetime input helper (YYYY-MM-DDTHH:mm) */
+const toInputDateTime = (ms: number) => {
+  const d = new Date(ms);
+  const year = d.getFullYear();
+  const month = pad2(d.getMonth() + 1);
+  const day = pad2(d.getDate());
+  const hours = pad2(d.getHours());
+  const minutes = pad2(d.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
 function usePersistentState<T>(
@@ -136,9 +184,214 @@ function usePersistentState<T>(
 /** ========= Supabase (ENV only) ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
 const supabase =
   SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+/** ========= Storage keys ========= */
+const LS_CATEGORIES = "talip-v2.categories";
+const LS_SESSIONS = "talip-v2.sessions";
+const LS_TARGET = "talip-v2.target";
+const LS_UPDATED_AT = "talip-v2.updatedAt";
+
+// --- ActiveTimer Component (Performance Optimization) ---
+// This component handles its own interval, so the main page doesn't re-render every second.
+const ActiveTimer = ({
+  running,
+  onStop,
+  categoryMap,
+  themeColor,
+}: {
+  running: Running;
+  onStop: () => void;
+  categoryMap: Map<string, Category>;
+  themeColor: string;
+}) => {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <Card className="text-white border-none shadow-xl relative overflow-hidden">
+      <div
+        className="absolute inset-0"
+        style={{
+          background: `linear-gradient(135deg, ${themeColor} 0%, rgba(15, 23, 42, 1) 70%)`,
+        }}
+      />
+      <div className="absolute top-0 right-0 -mt-10 -mr-10 w-40 h-40 bg-white/10 rounded-full blur-3xl" />
+      <CardContent className="flex flex-col sm:flex-row items-center justify-between py-8 gap-6 relative z-10">
+        <div className="flex items-center gap-4">
+          <div className="h-16 w-16 rounded-2xl flex items-center justify-center bg-white/10 backdrop-blur-sm border border-white/10 shadow-inner">
+            <Timer className="h-8 w-8" />
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-white/80 flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-white">
+                {categoryMap.get(running.categoryId)?.name ?? running.categoryId}
+              </span>
+              {running.label ? (
+                <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
+                  {running.label}
+                </Badge>
+              ) : (
+                <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
+                  (etiketsiz)
+                </Badge>
+              )}
+              <span className="text-xs text-white/60">• Başlangıç: {fmtTime(running.start)}</span>
+            </h3>
+            <div className="text-5xl sm:text-6xl font-bold tabular-nums tracking-tight mt-1 font-mono">
+              {fmtDuration(now - running.start)}
+            </div>
+          </div>
+        </div>
+
+        <Button
+          variant="destructive"
+          size="lg"
+          className="h-14 px-8 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
+          onClick={onStop}
+        >
+          <Square className="mr-2 h-5 w-5 fill-current" /> Durdur & Kaydet
+        </Button>
+      </CardContent>
+    </Card>
+  );
+};
+
+// --- Session Dialog (Manual Add / Edit) ---
+const SessionDialog = ({
+  isOpen,
+  onOpenChange,
+  initialData,
+  categories,
+  onSave,
+}: {
+  isOpen: boolean;
+  onOpenChange: (o: boolean) => void;
+  initialData?: Session | null;
+  categories: Category[];
+  onSave: (s: Partial<Session>) => void;
+}) => {
+  const [formData, setFormData] = useState({
+    categoryId: "",
+    label: "",
+    startStr: "",
+    endStr: "",
+  });
+
+  useEffect(() => {
+    if (isOpen) {
+      if (initialData) {
+        // Edit mode
+        setFormData({
+          categoryId: initialData.categoryId,
+          label: initialData.label,
+          startStr: toInputDateTime(initialData.start),
+          endStr: toInputDateTime(initialData.end),
+        });
+      } else {
+        // Create mode (default: now - 1 hour to now)
+        const now = Date.now();
+        setFormData({
+          categoryId: categories[0]?.id || "",
+          label: "",
+          startStr: toInputDateTime(now - 3600000),
+          endStr: toInputDateTime(now),
+        });
+      }
+    }
+  }, [isOpen, initialData, categories]);
+
+  const handleSave = () => {
+    const start = new Date(formData.startStr).getTime();
+    const end = new Date(formData.endStr).getTime();
+
+    if (isNaN(start) || isNaN(end)) {
+      alert("Lütfen geçerli bir tarih seçin.");
+      return;
+    }
+    if (end <= start) {
+      alert("Bitiş zamanı başlangıçtan sonra olmalıdır.");
+      return;
+    }
+
+    onSave({
+      id: initialData?.id, // Keep ID if editing
+      categoryId: formData.categoryId,
+      label: formData.label,
+      start,
+      end,
+    });
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{initialData ? "Kaydı Düzenle" : "Manuel Kayıt Ekle"}</DialogTitle>
+          <DialogDescription>
+            {initialData ? "Mevcut çalışma kaydını güncelle." : "Geçmişe dönük bir çalışma kaydı oluştur."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label className="text-right">Kategori</Label>
+            <Select
+              value={formData.categoryId}
+              onValueChange={(v) => setFormData({ ...formData, categoryId: v })}
+            >
+              <SelectTrigger className="col-span-3">
+                <SelectValue placeholder="Kategori seç" />
+              </SelectTrigger>
+              <SelectContent>
+                {categories.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label className="text-right">Etiket</Label>
+            <Input
+              value={formData.label}
+              onChange={(e) => setFormData({ ...formData, label: e.target.value })}
+              className="col-span-3"
+              placeholder="Opsiyonel"
+            />
+          </div>
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label className="text-right">Başlangıç</Label>
+            <Input
+              type="datetime-local"
+              value={formData.startStr}
+              onChange={(e) => setFormData({ ...formData, startStr: e.target.value })}
+              className="col-span-3"
+            />
+          </div>
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label className="text-right">Bitiş</Label>
+            <Input
+              type="datetime-local"
+              value={formData.endStr}
+              onChange={(e) => setFormData({ ...formData, endStr: e.target.value })}
+              className="col-span-3"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button onClick={handleSave}>Kaydet</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 export default function Page() {
   // --- Persistent local state ---
@@ -152,9 +405,36 @@ export default function Page() {
 
   // --- Runtime state ---
   const [running, setRunning] = useState<Running | null>(null);
-  const [now, setNow] = useState(Date.now());
+  
+  // NOTE: `now` removed from main component to prevent global re-renders. 
+  // It is now encapsulated in ActiveTimer or calculated on demand where needed (like charts, slightly less precise live updates for charts but better perf).
+  // For charts, we will use a less frequent update or just initial render time.
+  const [nowForCalculations, setNowForCalculations] = useState(Date.now());
+
+  // Quick start
   const [quickCat, setQuickCat] = useState<string>("");
   const [quickLabel, setQuickLabel] = useState("");
+
+  // List filters
+  const [searchQuery, setSearchQuery] = useState("");
+  const [rangeFilter, setRangeFilter] = useState<RangeFilter>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+
+  // Pagination
+  const [pageSize, setPageSize] = useState<number>(20);
+  const [page, setPage] = useState<number>(1);
+
+  // Mobile start sheet
+  const [mobileStartOpen, setMobileStartOpen] = useState(false);
+
+  // Dialogs
+  const [resetOpen, setResetOpen] = useState(false);
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
+  const [editingSession, setEditingSession] = useState<Session | null>(null);
+
+  // Category Management State
+  const [newCatName, setNewCatName] = useState("");
+  const [newCatColor, setNewCatColor] = useState("#3b82f6");
 
   // --- Cloud state ---
   const [user, setUser] = useState<User | null>(null);
@@ -165,15 +445,15 @@ export default function Page() {
   const isHydratingFromCloud = useRef(false);
   const saveDebounceRef = useRef<number | null>(null);
 
-  // Keep latest snapshot in ref (prevents callback churn)
+  // Keep latest snapshot in ref
   const stateRef = useRef({ categories, sessions, dailyTarget, localUpdatedAt });
   useEffect(() => {
     stateRef.current = { categories, sessions, dailyTarget, localUpdatedAt };
   }, [categories, sessions, dailyTarget, localUpdatedAt]);
 
-  // Tick
+  // Update `nowForCalculations` every minute for relative times/charts, instead of every second
   useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    const t = window.setInterval(() => setNowForCalculations(Date.now()), 60000);
     return () => window.clearInterval(t);
   }, []);
 
@@ -186,16 +466,48 @@ export default function Page() {
   }, [categories, quickCat]);
 
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
+  const getCatHex = useCallback((catId: string) => {
+    const cat = categories.find(c => c.id === catId);
+    return cat ? cat.color : "#64748b";
+  }, [categories]);
+
+  /** Stack keys with stable visual hierarchy */
+  const stackKeys = useMemo(() => {
+    return categories.map(c => c.id);
+  }, [categories]);
+
+  const theme = useMemo(() => {
+    const activeCat = running?.categoryId || quickCat || categories[0]?.id || "other";
+    const hex = getCatHex(activeCat);
+    const cat = categoryMap.get(activeCat);
+    const name = cat?.name ?? "Çalışma";
+    return { activeCat, hex, name };
+  }, [running?.categoryId, quickCat, categories, categoryMap, getCatHex]);
+
+  // Custom Legend
+  const renderLegend = useCallback(() => {
+    return (
+      <div className="mt-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm">
+        {categories.map((c) => (
+          <div key={c.id} className="inline-flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: c.color }} />
+            <span className="text-slate-700 dark:text-slate-200">{c.name}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }, [categories]);
 
   // --- Session controls ---
-  const startSession = () => {
+  const startSession = useCallback(() => {
     if (running) return;
     const catId = quickCat || categories[0]?.id;
     if (!catId) return;
     setRunning({ categoryId: catId, label: quickLabel.trim(), start: Date.now() });
-  };
+    setMobileStartOpen(false);
+  }, [running, quickCat, categories, quickLabel]);
 
-  const stopSession = () => {
+  const stopSession = useCallback(() => {
     if (!running) return;
     const newSession: Session = {
       id: uid(),
@@ -205,47 +517,100 @@ export default function Page() {
       end: Date.now(),
     };
 
-    setSessions((prev) => {
-      const next = [newSession, ...prev];
-      return next;
-    });
-
+    setSessions((prev) => [newSession, ...prev]);
     setLocalUpdatedAt(Date.now());
     setRunning(null);
     setQuickLabel("");
-  };
+  }, [running]);
 
-  const deleteSession = (id: string) => {
+  const deleteSession = useCallback((id: string) => {
     if (!confirm("Bu kayıt kalıcı olarak silinsin mi?")) return;
     setSessions((prev) => prev.filter((s) => s.id !== id));
     setLocalUpdatedAt(Date.now());
+  }, []);
+
+  // --- CRUD Operations ---
+  const handleSessionSave = (data: Partial<Session>) => {
+    if (data.id) {
+      // Edit existing
+      setSessions((prev) =>
+        prev.map((s) => (s.id === data.id ? { ...s, ...data } as Session : s))
+      );
+    } else {
+      // Create new
+      const newSession: Session = {
+        id: uid(),
+        categoryId: data.categoryId!,
+        label: data.label || "",
+        start: data.start!,
+        end: data.end!,
+      };
+      setSessions((prev) => [newSession, ...prev]);
+    }
+    setLocalUpdatedAt(Date.now());
+  };
+
+  const openEditDialog = (session: Session) => {
+    setEditingSession(session);
+    setSessionDialogOpen(true);
+  };
+
+  const openCreateDialog = () => {
+    setEditingSession(null);
+    setSessionDialogOpen(true);
+  };
+
+  // --- Category Management ---
+  const addCategory = () => {
+    if (!newCatName.trim()) return;
+    const newId = `cat_${Date.now()}`;
+    const newCat: Category = {
+      id: newId,
+      name: newCatName.trim(),
+      color: newCatColor,
+    };
+    setCategories(prev => [...prev, newCat]);
+    setNewCatName("");
+    setLocalUpdatedAt(Date.now());
+  };
+
+  const deleteCategory = (id: string) => {
+    if (categories.length <= 1) {
+      alert("En az bir kategori kalmalı.");
+      return;
+    }
+    if(!confirm("Bu kategoriyi silmek istediğine emin misin? Bu kategoriye ait kayıtlar silinmez ancak 'Bilinmeyen' olarak görünebilir.")) return;
+    setCategories(prev => prev.filter(c => c.id !== id));
+    setLocalUpdatedAt(Date.now());
+  };
+
+  const updateCategory = (id: string, field: keyof Category, value: string) => {
+      setCategories(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+      setLocalUpdatedAt(Date.now());
   };
 
   // --- Cloud sync functions ---
-  const pushToCloud = useCallback(
-    async (u: User, label?: string) => {
-      if (!supabase) return;
-      setCloudStatus("syncing");
-      setCloudMsg(label ? `Senkronlanıyor (${label})...` : "Senkronlanıyor...");
+  const pushToCloud = useCallback(async (u: User, label?: string) => {
+    if (!supabase) return;
+    setCloudStatus("syncing");
+    setCloudMsg(label ? `Senkronlanıyor (${label})...` : "Senkronlanıyor...");
 
-      const { categories, sessions, dailyTarget } = stateRef.current;
-      const snapshot: Snapshot = { categories, sessions, dailyTarget };
-      const nowIso = new Date().toISOString();
+    const { categories, sessions, dailyTarget } = stateRef.current;
+    const snapshot: Snapshot = { categories, sessions, dailyTarget };
+    const nowIso = new Date().toISOString();
 
-      const { error } = await supabase
-        .from("user_data")
-        .upsert({ user_id: u.id, data: snapshot, updated_at: nowIso }, { onConflict: "user_id" });
+    const { error } = await supabase
+      .from("user_data")
+      .upsert({ user_id: u.id, data: snapshot, updated_at: nowIso }, { onConflict: "user_id" });
 
-      if (error) {
-        setCloudStatus("error");
-        setCloudMsg(error.message || "Yükleme hatası");
-        return;
-      }
-      setCloudStatus("signed_in");
-      setCloudMsg(label ? `Senkronlandı (${label})` : "Senkronlandı");
-    },
-    []
-  );
+    if (error) {
+      setCloudStatus("error");
+      setCloudMsg(error.message || "Yükleme hatası");
+      return;
+    }
+    setCloudStatus("signed_in");
+    setCloudMsg(label ? `Senkronlandı (${label})` : "Senkronlandı");
+  }, []);
 
   const loadFromCloud = useCallback(
     async (u: User) => {
@@ -268,13 +633,11 @@ export default function Page() {
       const remoteMs = data?.updated_at ? Date.parse(data.updated_at) : 0;
       const { localUpdatedAt } = stateRef.current;
 
-      // No remote yet => push local snapshot as first sync
       if (!data?.data) {
         await pushToCloud(u, "İlk kurulum");
         return;
       }
 
-      // Remote newer => hydrate from cloud
       if (remoteMs > (localUpdatedAt || 0)) {
         isHydratingFromCloud.current = true;
 
@@ -293,7 +656,6 @@ export default function Page() {
         return;
       }
 
-      // Local newer or equal => push local to cloud (keeps it in sync)
       if ((localUpdatedAt || 0) >= remoteMs) {
         await pushToCloud(u, "Yerel daha yeni");
       } else {
@@ -304,7 +666,7 @@ export default function Page() {
     [pushToCloud]
   );
 
-  // Auth init + listener (stable)
+  // Auth init + listener
   useEffect(() => {
     if (!supabase) return;
     if (!catsHydrated || !sessionsHydrated) return;
@@ -374,8 +736,8 @@ export default function Page() {
     setCloudMsg("Çıkış yapıldı");
   };
 
-  // --- Analytics (same language, same logic) ---
-  const getDailyTotal = useCallback(
+  // --- Analytics helpers (ms-based) ---
+  const getDailyTotalMs = useCallback(
     (dateMs: number) => {
       const start = startOfDayMs(new Date(dateMs));
       const end = start + 86400000;
@@ -386,15 +748,68 @@ export default function Page() {
     [sessions]
   );
 
-  const todayTotal = useMemo(() => getDailyTotal(Date.now()), [getDailyTotal, now]);
-  const progressPercent = Math.min(100, (todayTotal / (Math.max(0.01, dailyTarget) * 3600000)) * 100);
+  const getWeekTotalMs = useCallback(
+    (dateMs: number) => {
+      const start = startOfWeekMs(new Date(dateMs));
+      const end = start + 7 * 86400000;
+      return sessions
+        .filter((s) => s.start >= start && s.start < end)
+        .reduce((acc, s) => acc + (s.end - s.start), 0);
+    },
+    [sessions]
+  );
 
+  const todayTotal = useMemo(() => getDailyTotalMs(Date.now()), [getDailyTotalMs, nowForCalculations, sessions]);
+  const weekTotal = useMemo(() => getWeekTotalMs(Date.now()), [getWeekTotalMs, nowForCalculations, sessions]);
+  const targetMs = Math.max(0.01, dailyTarget) * 3600000;
+  const progressPercent = Math.min(100, (todayTotal / targetMs) * 100);
+
+  const todayHuman = useMemo(() => fmtHmFromMs(todayTotal), [todayTotal]);
+  const weekHuman = useMemo(() => fmtHmFromMs(weekTotal), [weekTotal]);
+  const targetHuman = useMemo(() => fmtHmFromMs(targetMs), [targetMs]);
+
+  // streak
+  const streakDays = useMemo(() => {
+    let streak = 0;
+    for (let i = 0; i < 365; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const total = getDailyTotalMs(d.getTime());
+      if (total >= targetMs) streak++;
+      else break;
+    }
+    return streak;
+  }, [getDailyTotalMs, targetMs, sessions]);
+
+  // yesterday delta
+  const yesterdayDeltaMin = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const y = getDailyTotalMs(d.getTime());
+    return Math.round((todayTotal - y) / 60000);
+  }, [todayTotal, getDailyTotalMs, nowForCalculations]);
+
+  // Charts (daily/weekly/monthly)
   const chartData = useMemo(() => {
-    const sumHours = (sess: Session[]) => sess.reduce((acc, s) => acc + (s.end - s.start), 0) / 3600000;
+    const sumHoursByCategory = (sess: Session[]) => {
+      const byCat: Record<string, number> = {};
+      for (const k of stackKeys) byCat[k] = 0;
+
+      for (const s of sess) {
+        const k = s.categoryId;
+        if (!(k in byCat)) byCat[k] = 0;
+        byCat[k] += (s.end - s.start) / 3600000;
+      }
+
+      // keep 1-decimal for chart smoothness
+      for (const k of Object.keys(byCat)) byCat[k] = Number(byCat[k].toFixed(1));
+      return byCat;
+    };
 
     // 1) Daily last 7
-    const daily: Array<{ name: string; fullDate: string; saat: number }> = [];
-    let dailyTotal = 0;
+    const daily: Array<any> = [];
+    let dailyTotalHours = 0;
+
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
@@ -403,45 +818,47 @@ export default function Page() {
       const start = d.getTime();
       const end = start + 86400000;
       const daySessions = sessions.filter((s) => s.start >= start && s.start < end);
-      const hrs = sumHours(daySessions);
-      dailyTotal += hrs;
+
+      const byCat = sumHoursByCategory(daySessions);
+      const totalHrs = Object.values(byCat).reduce((a, b) => a + b, 0);
+      dailyTotalHours += totalHrs;
 
       daily.push({
         name: d.toLocaleDateString("tr-TR", { weekday: "short" }),
-        fullDate: d.toLocaleDateString("tr-TR"),
-        saat: Number(hrs.toFixed(1)),
+        fullDate: d.toLocaleDateString("tr-TR", { day: "2-digit", month: "long", year: "numeric" }),
+        ...byCat,
+        total: Number(totalHrs.toFixed(1)),
       });
     }
 
     // 2) Weekly last 4
-    const weekly: Array<{ name: string; saat: number }> = [];
-    let weeklyTotal = 0;
+    const weekly: Array<any> = [];
+    let weeklyTotalHours = 0;
+
     for (let i = 3; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i * 7);
 
-      const day = d.getDay();
-      const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-      const monday = new Date(d);
-      monday.setDate(diff);
-      monday.setHours(0, 0, 0, 0);
-
-      const start = monday.getTime();
+      const start = startOfWeekMs(d);
       const end = start + 7 * 86400000;
 
       const weekSessions = sessions.filter((s) => s.start >= start && s.start < end);
-      const hrs = sumHours(weekSessions);
-      weeklyTotal += hrs;
 
+      const byCat = sumHoursByCategory(weekSessions);
+      const totalHrs = Object.values(byCat).reduce((a, b) => a + b, 0);
+      weeklyTotalHours += totalHrs;
+
+      const monday = new Date(start);
       weekly.push({
         name: `${monday.getDate()} ${monday.toLocaleDateString("tr-TR", { month: "short" })}`,
-        saat: Number(hrs.toFixed(1)),
+        ...byCat,
+        total: Number(totalHrs.toFixed(1)),
       });
     }
 
-    // 3) Monthly last 6
+    // 3) Monthly last 6 (total hours)
     const monthly: Array<{ name: string; saat: number }> = [];
-    let monthlyTotal = 0;
+    let monthlyTotalHours = 0;
     for (let i = 5; i >= 0; i--) {
       const d = new Date();
       d.setMonth(d.getMonth() - i);
@@ -454,8 +871,8 @@ export default function Page() {
       const end = nextMonth.getTime();
 
       const monthSessions = sessions.filter((s) => s.start >= start && s.start < end);
-      const hrs = sumHours(monthSessions);
-      monthlyTotal += hrs;
+      const hrs = monthSessions.reduce((acc, s) => acc + (s.end - s.start), 0) / 3600000;
+      monthlyTotalHours += hrs;
 
       monthly.push({
         name: d.toLocaleDateString("tr-TR", { month: "short", year: "2-digit" }),
@@ -463,18 +880,98 @@ export default function Page() {
       });
     }
 
-    return { daily, dailyTotal, weekly, weeklyTotal, monthly, monthlyTotal };
-  }, [sessions, now]);
+    return {
+      daily,
+      dailyTotalHours: Number(dailyTotalHours.toFixed(1)),
+      weekly,
+      weeklyTotalHours: Number(weeklyTotalHours.toFixed(1)),
+      monthly,
+      monthlyTotalHours: Number(monthlyTotalHours.toFixed(1)),
+    };
+  }, [sessions, stackKeys]);
+
+  // Category distribution (last 7 days)
+  const categoryDistribution7d = useMemo(() => {
+    const end = Date.now();
+    const start = startOfDayMs(new Date(end)) - 6 * 86400000;
+    const bucket = new Map<string, number>();
+    for (const s of sessions) {
+      if (s.start < start || s.start > end) continue;
+      bucket.set(s.categoryId, (bucket.get(s.categoryId) ?? 0) + (s.end - s.start));
+    }
+
+    const rows = Array.from(bucket.entries())
+      .map(([categoryId, ms]) => ({
+        categoryId,
+        name: categoryMap.get(categoryId)?.name ?? categoryId,
+        hours: ms / 3600000,
+        color: getCatHex(categoryId),
+      }))
+      .sort((a, b) => b.hours - a.hours);
+
+    const totalHours = rows.reduce((acc, r) => acc + r.hours, 0);
+    return { rows, totalHours };
+  }, [sessions, categoryMap, getCatHex]);
+
+  // Top labels (last 7 days)
+  const topLabels7d = useMemo(() => {
+    const end = Date.now();
+    const start = startOfDayMs(new Date(end)) - 6 * 86400000;
+    const bucket = new Map<string, number>();
+    for (const s of sessions) {
+      if (s.start < start || s.start > end) continue;
+      const key = (s.label || "").trim() ? s.label.trim() : "(etiketsiz)";
+      bucket.set(key, (bucket.get(key) ?? 0) + (s.end - s.start));
+    }
+    return Array.from(bucket.entries())
+      .map(([label, ms]) => ({ label, ms }))
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 5);
+  }, [sessions]);
+
+  // Filters & list view
+  const filteredSessions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const nowMs = Date.now();
+    const dayStart = startOfDayMs(new Date(nowMs));
+    const weekStart = startOfWeekMs(new Date(nowMs));
+
+    return sessions.filter((s) => {
+      if (rangeFilter === "today" && s.start < dayStart) return false;
+      if (rangeFilter === "week" && s.start < weekStart) return false;
+
+      if (categoryFilter !== "all" && s.categoryId !== categoryFilter) return false;
+
+      if (!q) return true;
+      const catName = (categoryMap.get(s.categoryId)?.name ?? s.categoryId).toLowerCase();
+      const label = (s.label ?? "").toLowerCase();
+      const dateStr = new Date(s.start).toLocaleDateString("tr-TR").toLowerCase();
+      return catName.includes(q) || label.includes(q) || dateStr.includes(q);
+    }).sort((a, b) => b.start - a.start); // Sort by date desc
+  }, [sessions, searchQuery, rangeFilter, categoryFilter, categoryMap]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, rangeFilter, categoryFilter, pageSize]);
+
+  const totalItems = filteredSessions.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const safePage = Math.min(page, totalPages);
+
+  const pagedSessions = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredSessions.slice(start, start + pageSize);
+  }, [filteredSessions, safePage, pageSize]);
 
   const handleExportCSV = () => {
-    const headers = ["ID", "Kategori", "Etiket", "Başlangıç", "Bitiş", "Süre (dk)"];
-    const rows = sessions.map((s) => [
+    const headers = ["ID", "Kategori", "Etiket", "Başlangıç", "Bitiş", "Süre"];
+    const rows = filteredSessions.map((s) => [
       s.id,
       categoryMap.get(s.categoryId)?.name || s.categoryId,
-      s.label || "",
+      (s.label || "").replace(/,/g, " "),
       new Date(s.start).toLocaleString("tr-TR"),
       new Date(s.end).toLocaleString("tr-TR"),
-      ((s.end - s.start) / 60000).toFixed(2),
+      fmtHmFromMs(s.end - s.start),
     ]);
 
     const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -496,19 +993,54 @@ export default function Page() {
     );
   }
 
+  const dailyTotalHuman7d = fmtHmFromHours(chartData.dailyTotalHours);
+  const weeklyTotalHuman4w = fmtHmFromHours(chartData.weeklyTotalHours);
+  const monthlyTotalHuman6m = fmtHmFromHours(chartData.monthlyTotalHours);
+
   return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
       <div className="mx-auto max-w-5xl px-4 py-6 pb-32 sm:pb-10">
+        
+        {/* Helper Dialogs */}
+        <SessionDialog 
+          isOpen={sessionDialogOpen} 
+          onOpenChange={setSessionDialogOpen}
+          initialData={editingSession}
+          categories={categories}
+          onSave={handleSessionSave}
+        />
+
         {/* Header */}
         <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
+          <div className="space-y-1">
             <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
-              <div className="bg-primary text-primary-foreground p-2 rounded-xl">
+              <div className="text-primary-foreground p-2 rounded-xl" style={{ backgroundColor: theme.hex }}>
                 <Timer className="h-6 w-6" />
               </div>
               Çalışalım
             </h1>
-            <p className="text-muted-foreground mt-1"></p>
+
+            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                <Target className="h-4 w-4" />
+                Bugün: <span className="text-slate-900 dark:text-slate-50 font-medium">{todayHuman}</span> /{" "}
+                <span className="font-medium">{targetHuman}</span>
+              </span>
+
+              <span className="text-muted-foreground">•</span>
+
+              <span className="inline-flex items-center gap-1">
+                <TrendingUp className="h-4 w-4" />
+                Hafta: <span className="text-slate-900 dark:text-slate-50 font-medium">{weekHuman}</span>
+              </span>
+
+              <span className="text-muted-foreground">•</span>
+
+              <span className="inline-flex items-center gap-1">
+                <Flame className="h-4 w-4" />
+                Streak: <span className="text-slate-900 dark:text-slate-50 font-medium">{streakDays} gün</span>
+              </span>
+            </div>
           </div>
 
           <div className="flex gap-2 items-center">
@@ -518,7 +1050,8 @@ export default function Page() {
                 <DropdownMenuTrigger asChild>
                   <Button
                     variant={user ? "outline" : "default"}
-                    className={`gap-2 ${!user ? "bg-indigo-600 hover:bg-indigo-700 text-white" : ""}`}
+                    className={`gap-2 ${!user ? "text-white" : ""}`}
+                    style={!user ? { backgroundColor: theme.hex } : undefined}
                   >
                     {cloudStatus === "syncing" ? (
                       <RefreshCw className="h-4 w-4 animate-spin" />
@@ -528,16 +1061,40 @@ export default function Page() {
                     {user ? "Senkronize" : "Giriş Yap"}
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuContent align="end" className="w-72">
                   <DropdownMenuLabel>Bulut Senkronizasyonu</DropdownMenuLabel>
                   <DropdownMenuSeparator />
+
+                  <div className="px-2 py-1.5">
+                    <Badge
+                      variant="outline"
+                      className={`rounded-full ${
+                        cloudStatus === "error"
+                          ? "border-rose-200 text-rose-600"
+                          : cloudStatus === "syncing"
+                          ? "border-amber-200 text-amber-700"
+                          : "border-emerald-200 text-emerald-700"
+                      }`}
+                    >
+                      {cloudStatus === "error"
+                        ? "Hata"
+                        : cloudStatus === "syncing"
+                        ? "Senkron"
+                        : user
+                        ? "Bağlı"
+                        : "Bağlı değil"}
+                    </Badge>
+                    <div className="text-[11px] text-muted-foreground mt-1">
+                      {cloudStatus === "error" ? `Hata: ${cloudMsg}` : cloudMsg}
+                    </div>
+                  </div>
+
+                  <DropdownMenuSeparator />
+
                   {user ? (
                     <>
                       <div className="px-2 py-1.5 text-xs text-muted-foreground break-all">
                         Giriş yapıldı: <br /> {user.email}
-                      </div>
-                      <div className="px-2 py-1.5 text-xs font-medium text-emerald-600">
-                        {cloudStatus === "error" ? `Hata: ${cloudMsg}` : cloudMsg || "Veriler güvende"}
                       </div>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={() => loadFromCloud(user)}>
@@ -561,9 +1118,6 @@ export default function Page() {
                       <Button size="sm" className="w-full h-8" disabled={!supabase} onClick={handleSignIn}>
                         <Mail className="mr-2 h-3 w-3" /> Link Gönder
                       </Button>
-                      <div className="text-[11px] text-muted-foreground">
-                        {cloudStatus === "error" ? `Hata: ${cloudMsg}` : cloudMsg}
-                      </div>
                     </div>
                   )}
                 </DropdownMenuContent>
@@ -575,7 +1129,7 @@ export default function Page() {
             )}
 
             {/* Export */}
-            <Button variant="outline" size="icon" onClick={handleExportCSV} title="CSV İndir">
+            <Button variant="outline" size="icon" onClick={handleExportCSV} title="CSV İndir (filtreli)">
               <Download className="h-4 w-4" />
             </Button>
           </div>
@@ -596,7 +1150,10 @@ export default function Page() {
                       <SelectContent>
                         {categories.map((c) => (
                           <SelectItem key={c.id} value={c.id}>
-                            {c.name}
+                            <span className="inline-flex items-center gap-2">
+                              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: c.color }} />
+                              {c.name}
+                            </span>
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -614,103 +1171,74 @@ export default function Page() {
                   </div>
                 </div>
 
-                <Button
-                  size="lg"
-                  className="h-12 px-8 w-full sm:w-auto rounded-xl shadow-lg shadow-primary/20"
-                  onClick={startSession}
-                >
-                  <Play className="mr-2 h-5 w-5 fill-current" /> Başlat
-                </Button>
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <Button
+                      size="lg"
+                      className="h-12 px-8 flex-1 sm:flex-auto rounded-xl shadow-lg border-0 text-white"
+                      style={{ backgroundColor: theme.hex }}
+                      onClick={startSession}
+                    >
+                      <Play className="mr-2 h-5 w-5 fill-current" /> Başlat
+                    </Button>
+                    <Button
+                        size="lg"
+                        variant="outline"
+                        className="h-12 px-4 rounded-xl border-slate-200"
+                        title="Manuel Ekle"
+                        onClick={openCreateDialog}
+                    >
+                        <Plus className="h-5 w-5 text-slate-500" />
+                    </Button>
+                </div>
               </CardContent>
             </Card>
           ) : (
-            <Card className="bg-gradient-to-r from-slate-900 to-slate-800 text-white border-none shadow-xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 -mt-10 -mr-10 w-40 h-40 bg-white/5 rounded-full blur-3xl animate-pulse" />
-              <CardContent className="flex flex-col sm:flex-row items-center justify-between py-8 gap-6 relative z-10">
-                <div className="flex items-center gap-4">
-                  <div className="h-16 w-16 rounded-2xl flex items-center justify-center bg-white/10 backdrop-blur-sm border border-white/10 shadow-inner">
-                    <Timer className="h-8 w-8 animate-pulse text-indigo-300" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-medium text-indigo-100 flex items-center gap-2">
-                      {categoryMap.get(running.categoryId)?.name ?? running.categoryId}
-                      {running.label ? (
-                        <Badge variant="secondary" className="bg-white/10 hover:bg-white/20 text-white border-0">
-                          {running.label}
-                        </Badge>
-                      ) : null}
-                    </h3>
-                    <div className="text-4xl font-bold tabular-nums tracking-tight mt-1 font-mono">
-                      {fmtDuration(now - running.start)}
-                    </div>
-                  </div>
-                </div>
-
-                <Button
-                  variant="destructive"
-                  size="lg"
-                  className="h-14 px-8 rounded-xl bg-rose-500 hover:bg-rose-600 text-white shadow-lg shadow-rose-900/20 border-0"
-                  onClick={stopSession}
-                >
-                  <Square className="mr-2 h-5 w-5 fill-current" /> Durdur & Kaydet
-                </Button>
-              </CardContent>
-            </Card>
+            // Active Timer extracted to component for performance
+            <ActiveTimer 
+              running={running} 
+              onStop={stopSession} 
+              categoryMap={categoryMap}
+              themeColor={theme.hex}
+            />
           )}
         </div>
 
-        {/* Dashboard Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <Card className="md:col-span-2 shadow-sm">
+        {/* KPI Row */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          <Card className="shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base font-medium flex justify-between">
-                <span>Günlük Hedef</span>
-                <span className="text-muted-foreground font-normal">
-                  {fmtDuration(todayTotal)} / {dailyTarget}sa
-                </span>
+              <CardTitle className="text-base font-medium flex items-center gap-2">
+                <Target className="h-4 w-4" /> Bugün
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="h-4 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-indigo-500 transition-all duration-1000 ease-out"
-                  style={{ width: `${progressPercent}%` }}
-                />
+              <div className="flex items-end justify-between">
+                <div className="text-3xl font-bold">{todayHuman}</div>
+                <div className="text-xs text-muted-foreground">{targetHuman} hedef</div>
               </div>
-              <p className="text-xs text-muted-foreground mt-3">
-                {progressPercent >= 100 ? "Harika! Hedefine ulaştın 🎉" : "Hedefe ulaşmak için çalışmaya devam et."}
-              </p>
 
-              <div className="mt-4">
-                <Label>Günlük hedef (saat)</Label>
-                <Input
-                  className="mt-1 max-w-[220px]"
-                  type="number"
-                  min={0}
-                  step={0.25}
-                  value={dailyTarget}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    setDailyTarget(Number.isFinite(v) ? v : 0);
-                    setLocalUpdatedAt(Date.now());
-                  }}
+              <div className="mt-3 h-2.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full transition-all duration-700 ease-out"
+                  style={{ width: `${progressPercent}%`, backgroundColor: theme.hex }}
                 />
               </div>
+
+              <p className="text-xs text-muted-foreground mt-3">
+                {progressPercent >= 100 ? "Harika! Hedef tamam 🎉" : "Hedefe ulaşmak için devam."}
+              </p>
             </CardContent>
           </Card>
 
           <Card className="shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base font-medium">Bu Hafta</CardTitle>
+              <CardTitle className="text-base font-medium flex items-center gap-2">
+                <TrendingUp className="h-4 w-4" /> Bu Hafta
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-50">
-                {chartData.weeklyTotal.toFixed(1)} <span className="text-sm font-normal text-muted-foreground">saat</span>
-              </div>
-              <div className="flex items-center text-xs text-emerald-600 mt-2 font-medium">
-                <TrendingUp className="h-3 w-3 mr-1" />
-                Toplam çalışma süresi
-              </div>
+              <div className="text-3xl font-bold">{weekHuman}</div>
+              <div className="text-xs text-muted-foreground mt-1">Haftalık toplam çalışma süresi</div>
             </CardContent>
           </Card>
         </div>
@@ -741,116 +1269,291 @@ export default function Page() {
           {/* Sessions */}
           <TabsContent value="sessions" className="mt-6">
             <div className="space-y-4">
-              <div className="flex items-center gap-2 mb-4">
-                <div className="relative flex-1 max-w-sm">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <div className="relative flex-1 max-w-xl">
                   <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input placeholder="Ara... (şimdilik görsel)" className="pl-9 rounded-xl bg-white" />
+                  <Input
+                    placeholder="Kategori, etiket veya tarih ara..."
+                    className="pl-9 rounded-xl bg-white"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
                 </div>
-                <Button variant="outline" size="icon" className="rounded-xl" title="Filtre (yakında)">
-                  <Filter className="h-4 w-4" />
-                </Button>
+
+                <div className="flex items-center gap-2">
+                  <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+                    <SelectTrigger className="h-10 rounded-xl w-[160px] bg-white">
+                      <SelectValue placeholder="Kategori" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Tüm kategoriler</SelectItem>
+                      {categories.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          <span className="inline-flex items-center gap-2">
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: c.color }} />
+                            {c.name}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" className="rounded-xl gap-2">
+                        <Filter className="h-4 w-4" />
+                        {rangeFilter === "all" ? "Tümü" : rangeFilter === "today" ? "Bugün" : "Bu hafta"}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuLabel>Zaman Aralığı</DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={() => setRangeFilter("all")}>Tümü</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setRangeFilter("today")}>Bugün</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setRangeFilter("week")}>Bu hafta</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               </div>
 
-              {sessions.length === 0 ? (
-                <div className="text-center py-20 bg-slate-50 border border-dashed rounded-xl">
+              {filteredSessions.length === 0 ? (
+                <div className="text-center py-16 bg-slate-50 border border-dashed rounded-2xl">
                   <div className="bg-slate-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
                     <Timer className="h-8 w-8 text-slate-400" />
                   </div>
-                  <h3 className="text-lg font-medium text-slate-900">Henüz kayıt yok</h3>
-                  <p className="text-slate-500 max-w-xs mx-auto mt-2">
-                    Yukarıdaki panelden bir kategori seç ve çalışmaya başla.
+                  <h3 className="text-lg font-medium text-slate-900 dark:text-slate-100">
+                    {sessions.length === 0 ? "Henüz kayıt yok" : "Sonuç bulunamadı"}
+                  </h3>
+                  <p className="text-slate-500 max-w-md mx-auto mt-2">
+                    {sessions.length === 0 ? "Bir kategori seç ve çalışmayı başlat." : "Filtreleri değiştirerek tekrar dene."}
                   </p>
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {sessions.map((session) => {
-                    const cat = categoryMap.get(session.categoryId);
-                    return (
-                      <div
-                        key={session.id}
-                        className="group flex items-center justify-between p-4 bg-white dark:bg-slate-900 border rounded-2xl shadow-sm hover:shadow-md transition-all hover:border-indigo-200 dark:hover:border-indigo-900"
-                      >
-                        <div className="flex items-center gap-4">
-                          <div
-                            className={`h-10 w-10 rounded-full flex items-center justify-center ${
-                              cat?.color ?? "bg-slate-500"
-                            } text-white font-bold text-xs shadow-md`}
-                          >
-                            {(cat?.name ?? session.categoryId).substring(0, 2).toUpperCase()}
-                          </div>
-                          <div>
-                            <div className="font-medium text-slate-900 dark:text-slate-100">
-                              {cat?.name ?? session.categoryId}
-                              {session.label ? (
-                                <span className="text-muted-foreground font-normal"> · {session.label}</span>
-                              ) : null}
-                            </div>
-                            <div className="text-xs text-muted-foreground flex gap-2">
-                              <span>
-                                {new Date(session.start).toLocaleDateString("tr-TR", {
-                                  weekday: "short",
-                                  day: "numeric",
-                                  month: "short",
-                                })}
-                              </span>
-                              <span>•</span>
-                              <span>
-                                {fmtTime(session.start)} - {fmtTime(session.end)}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
+                <>
+                  <div className="space-y-2">
+                    {pagedSessions.map((session) => {
+                      const cat = categoryMap.get(session.categoryId);
+                      const leftColor = getCatHex(session.categoryId);
+                      const durationMs = session.end - session.start;
 
-                        <div className="flex items-center gap-4">
-                          <div className="font-mono font-medium text-slate-700 dark:text-slate-300">
-                            {fmtDuration(session.end - session.start)}
+                      return (
+                        <div
+                          key={session.id}
+                          className="group flex items-center justify-between p-4 bg-white dark:bg-slate-900 border rounded-2xl shadow-sm hover:shadow-md transition-all hover:border-slate-200 dark:hover:border-slate-800"
+                          style={{ borderLeftWidth: 4, borderLeftColor: leftColor }}
+                        >
+                          <div className="flex items-center gap-4 min-w-0">
+                            <div
+                              className="h-10 w-10 rounded-full flex items-center justify-center text-white font-bold text-xs shadow-md shrink-0"
+                              style={{ backgroundColor: leftColor }}
+                            >
+                              {(cat?.name ?? session.categoryId).substring(0, 2).toUpperCase()}
+                            </div>
+
+                            <div className="min-w-0">
+                              <div className="font-medium text-slate-900 dark:text-slate-100 truncate">
+                                {cat?.name ?? session.categoryId}
+                                <span className="ml-2">
+                                  {session.label ? (
+                                    <Badge variant="outline" className="rounded-full">
+                                      {session.label}
+                                    </Badge>
+                                  ) : (
+                                    <Badge variant="outline" className="rounded-full text-muted-foreground">
+                                      (etiketsiz)
+                                    </Badge>
+                                  )}
+                                </span>
+                              </div>
+
+                              <div className="text-xs text-muted-foreground flex flex-wrap gap-2 mt-1">
+                                <span className="inline-flex items-center gap-1">
+                                  <CalendarIcon className="h-3.5 w-3.5" />
+                                  {new Date(session.start).toLocaleDateString("tr-TR", {
+                                    weekday: "short",
+                                    day: "numeric",
+                                    month: "short",
+                                  })}
+                                </span>
+                                <span>•</span>
+                                <span className="font-mono">
+                                  {fmtTime(session.start)} - {fmtTime(session.end)}
+                                </span>
+                                <span>•</span>
+                                <span className="font-mono">{fmtHmFromMs(durationMs)}</span>
+                              </div>
+                            </div>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-red-500"
-                            onClick={() => deleteSession(session.id)}
-                            title="Sil"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+
+                          <div className="flex items-center gap-3 shrink-0">
+                            <div className="hidden sm:block font-mono font-semibold text-slate-800 dark:text-slate-200">
+                              {fmtCompact(durationMs)}
+                            </div>
+
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon" className="rounded-xl">
+                                  <MoreVertical className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuLabel>İşlemler</DropdownMenuLabel>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onClick={() => openEditDialog(session)}>
+                                  <Pencil className="mr-2 h-4 w-4" /> Düzenle
+                                </DropdownMenuItem>
+                                <DropdownMenuItem className="text-red-600" onClick={() => deleteSession(session.id)}>
+                                  <Trash2 className="mr-2 h-4 w-4" /> Sil
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Pagination controls */}
+                  <div className="flex items-center justify-between flex-wrap gap-3 pt-4">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Sayfa başına</span>
+                      <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))}>
+                        <SelectTrigger className="h-9 w-[110px] rounded-xl bg-white">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="20">20</SelectItem>
+                          <SelectItem value="50">50</SelectItem>
+                          <SelectItem value="100">100</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        className="rounded-xl"
+                        disabled={safePage <= 1}
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      >
+                        Önceki
+                      </Button>
+
+                      <Badge variant="outline" className="rounded-full">
+                        {safePage} / {totalPages}
+                      </Badge>
+
+                      <Button
+                        variant="outline"
+                        className="rounded-xl"
+                        disabled={safePage >= totalPages}
+                        onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      >
+                        Sonraki
+                      </Button>
+                    </div>
+                  </div>
+                </>
               )}
             </div>
           </TabsContent>
 
           {/* Analytics */}
           <TabsContent value="analytics" className="mt-6 space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* Category distribution */}
+              <Card className="shadow-sm md:col-span-1">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base font-medium flex items-center gap-2">
+                    <PieChartIcon className="h-4 w-4" /> Son 7 Gün · Kategori
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {categoryDistribution7d.rows.length === 0 ? (
+                    <div className="text-sm text-muted-foreground py-10 text-center">Henüz veri yok</div>
+                  ) : (
+                    <>
+                      <div className="h-[220px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <RechartsPieChart>
+                            <Tooltip
+                              formatter={(v: any, _n: any, p: any) => [
+                                fmtHmFromHours(Number(v) || 0),
+                                p?.payload?.name ?? "",
+                              ]}
+                            />
+                            <Legend verticalAlign="bottom" height={40} />
+                            <Pie
+                              data={categoryDistribution7d.rows}
+                              dataKey="hours"
+                              nameKey="name"
+                              innerRadius={55}
+                              outerRadius={80}
+                              paddingAngle={3}
+                              stroke="transparent"
+                            >
+                              {categoryDistribution7d.rows.map((entry) => (
+                                <Cell key={entry.categoryId} fill={entry.color} />
+                              ))}
+                            </Pie>
+                          </RechartsPieChart>
+                        </ResponsiveContainer>
+                      </div>
+
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        Toplam: <span className="font-medium">{fmtHmFromHours(categoryDistribution7d.totalHours)}</span>
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Top labels */}
+              <Card className="shadow-sm md:col-span-2">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base font-medium flex items-center gap-2">
+                    <BarChart3 className="h-4 w-4" /> Son 7 Gün · En çok etiket
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {topLabels7d.length === 0 ? (
+                    <div className="text-sm text-muted-foreground py-10 text-center">Henüz veri yok</div>
+                  ) : (
+                    <div className="space-y-3">
+                      {topLabels7d.map((x) => (
+                        <div key={x.label} className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-medium truncate">{x.label}</div>
+                            <div className="text-xs text-muted-foreground">Son 7 günde toplam</div>
+                          </div>
+                          <Badge variant="outline" className="rounded-full">
+                            {fmtHmFromMs(x.ms)}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+
             <Tabs defaultValue="daily" className="w-full">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-4">
                 <div>
                   <h3 className="text-lg font-semibold flex items-center gap-2">
-                    <BarChart3 className="h-5 w-5 text-indigo-500" />
+                    <BarChart3 className="h-5 w-5" style={{ color: theme.hex }} />
                     Performans Analizi
                   </h3>
                   <p className="text-sm text-muted-foreground">Çalışma sürelerinin zaman içindeki dağılımı.</p>
                 </div>
                 <TabsList className="bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
-                  <TabsTrigger
-                    value="daily"
-                    className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                  >
+                  <TabsTrigger value="daily" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">
                     Günlük
                   </TabsTrigger>
-                  <TabsTrigger
-                    value="weekly"
-                    className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                  >
+                  <TabsTrigger value="weekly" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">
                     Haftalık
                   </TabsTrigger>
-                  <TabsTrigger
-                    value="monthly"
-                    className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                  >
+                  <TabsTrigger value="monthly" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">
                     Aylık
                   </TabsTrigger>
                 </TabsList>
@@ -861,30 +1564,56 @@ export default function Page() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   <Card className="md:col-span-3 shadow-sm border-slate-200">
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-base">Son 7 Gün</CardTitle>
+                      <CardTitle className="text-base">Son 7 Gün (Kategori Dağılımı)</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div className="h-[300px] w-full">
+                      <div className="h-[330px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={chartData.daily} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                          <BarChart
+                            data={chartData.daily}
+                            margin={{ top: 10, right: 10, left: -10, bottom: 0 }}
+                            barCategoryGap={18}
+                            barGap={2}
+                          >
                             <CartesianGrid strokeDasharray="3 3" vertical={false} />
                             <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12 }} dy={10} />
                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
-                            <Tooltip formatter={(v: any) => [`${v} Saat`, "Süre"]} />
-                            <Bar dataKey="saat" fill="#6366f1" radius={[6, 6, 0, 0]} barSize={32} />
+                            <Tooltip
+                              formatter={(v: any, name: any) => [
+                                fmtHmFromHours(Number(v) || 0),
+                                categoryMap.get(name)?.name ?? name,
+                              ]}
+                              labelFormatter={(_: any, payload: any) => payload?.[0]?.payload?.fullDate ?? ""}
+                            />
+                            <Legend verticalAlign="bottom" content={renderLegend} />
+                            {stackKeys.map((id) => (
+                              <Bar key={id} dataKey={id} stackId="a" fill={getCatHex(id)} barSize={32} radius={0} />
+                            ))}
                           </BarChart>
                         </ResponsiveContainer>
                       </div>
                     </CardContent>
                   </Card>
 
-                  <Card className="bg-indigo-50 border-indigo-100 flex flex-col justify-center items-center text-center p-6 shadow-none">
-                    <div className="h-12 w-12 rounded-full bg-indigo-100 flex items-center justify-center mb-3 text-indigo-600">
-                      <Calendar className="h-6 w-6" />
+                  <Card
+                    className="flex flex-col justify-center items-center text-center p-6 shadow-none border"
+                    style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}
+                  >
+                    <div
+                      className="h-12 w-12 rounded-full flex items-center justify-center mb-3"
+                      style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}
+                    >
+                      <CalendarIcon className="h-6 w-6" />
                     </div>
-                    <div className="text-3xl font-bold text-indigo-900">{chartData.dailyTotal.toFixed(1)}</div>
-                    <div className="text-sm font-medium text-indigo-600">Toplam Saat (7 Gün)</div>
-                    <div className="text-xs text-indigo-400 mt-2">Günlük Ort: {(chartData.dailyTotal / 7).toFixed(1)} sa</div>
+                    <div className="text-2xl font-bold" style={{ color: theme.hex }}>
+                      {dailyTotalHuman7d}
+                    </div>
+                    <div className="text-sm font-medium" style={{ color: theme.hex }}>
+                      Toplam (7 Gün)
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-2">
+                      Günlük Ort: {fmtHmFromHours(chartData.dailyTotalHours / 7)}
+                    </div>
                   </Card>
                 </div>
               </TabsContent>
@@ -894,30 +1623,55 @@ export default function Page() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   <Card className="md:col-span-3 shadow-sm border-slate-200">
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-base">Son 4 Hafta</CardTitle>
+                      <CardTitle className="text-base">Son 4 Hafta (Kategori Dağılımı)</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div className="h-[300px] w-full">
+                      <div className="h-[330px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={chartData.weekly} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                          <BarChart
+                            data={chartData.weekly}
+                            margin={{ top: 10, right: 10, left: -10, bottom: 0 }}
+                            barCategoryGap={18}
+                            barGap={2}
+                          >
                             <CartesianGrid strokeDasharray="3 3" vertical={false} />
                             <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12 }} dy={10} />
                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
-                            <Tooltip />
-                            <Bar dataKey="saat" fill="#10b981" radius={[6, 6, 0, 0]} barSize={40} />
+                            <Tooltip
+                              formatter={(v: any, name: any) => [
+                                fmtHmFromHours(Number(v) || 0),
+                                categoryMap.get(name)?.name ?? name,
+                              ]}
+                            />
+                            <Legend verticalAlign="bottom" content={renderLegend} />
+                            {stackKeys.map((id) => (
+                              <Bar key={id} dataKey={id} stackId="a" fill={getCatHex(id)} barSize={40} radius={0} />
+                            ))}
                           </BarChart>
                         </ResponsiveContainer>
                       </div>
                     </CardContent>
                   </Card>
 
-                  <Card className="bg-emerald-50 border-emerald-100 flex flex-col justify-center items-center text-center p-6 shadow-none">
-                    <div className="h-12 w-12 rounded-full bg-emerald-100 flex items-center justify-center mb-3 text-emerald-600">
+                  <Card
+                    className="flex flex-col justify-center items-center text-center p-6 shadow-none border"
+                    style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}
+                  >
+                    <div
+                      className="h-12 w-12 rounded-full flex items-center justify-center mb-3"
+                      style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}
+                    >
                       <BarChart3 className="h-6 w-6" />
                     </div>
-                    <div className="text-3xl font-bold text-emerald-900">{chartData.weeklyTotal.toFixed(1)}</div>
-                    <div className="text-sm font-medium text-emerald-600">Toplam Saat (4 Hafta)</div>
-                    <div className="text-xs text-emerald-500 mt-2">Haftalık Ort: {(chartData.weeklyTotal / 4).toFixed(1)} sa</div>
+                    <div className="text-2xl font-bold" style={{ color: theme.hex }}>
+                      {weeklyTotalHuman4w}
+                    </div>
+                    <div className="text-sm font-medium" style={{ color: theme.hex }}>
+                      Toplam (4 Hafta)
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-2">
+                      Haftalık Ort: {fmtHmFromHours(chartData.weeklyTotalHours / 4)}
+                    </div>
                   </Card>
                 </div>
               </TabsContent>
@@ -934,28 +1688,38 @@ export default function Page() {
                         <ResponsiveContainer width="100%" height="100%">
                           <AreaChart data={chartData.monthly} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                             <defs>
-                              <linearGradient id="colorMonth" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.8} />
-                                <stop offset="95%" stopColor="#f43f5e" stopOpacity={0} />
+                              <linearGradient id="monthGrad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor={theme.hex} stopOpacity={0.35} />
+                                <stop offset="95%" stopColor={theme.hex} stopOpacity={0} />
                               </linearGradient>
                             </defs>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} />
                             <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12 }} dy={10} />
                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
-                            <Tooltip />
-                            <Area type="monotone" dataKey="saat" stroke="#f43f5e" fillOpacity={1} fill="url(#colorMonth)" />
+                            <Tooltip formatter={(v: any) => [fmtHmFromHours(Number(v) || 0), "Süre"]} />
+                            <Area type="monotone" dataKey="saat" stroke={theme.hex} fillOpacity={1} fill="url(#monthGrad)" />
                           </AreaChart>
                         </ResponsiveContainer>
                       </div>
                     </CardContent>
                   </Card>
 
-                  <Card className="bg-rose-50 border-rose-100 flex flex-col justify-center items-center text-center p-6 shadow-none">
-                    <div className="h-12 w-12 rounded-full bg-rose-100 flex items-center justify-center mb-3 text-rose-600">
-                      <PieChart className="h-6 w-6" />
+                  <Card
+                    className="flex flex-col justify-center items-center text-center p-6 shadow-none border"
+                    style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}
+                  >
+                    <div
+                      className="h-12 w-12 rounded-full flex items-center justify-center mb-3"
+                      style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}
+                    >
+                      <PieChartIcon className="h-6 w-6" />
                     </div>
-                    <div className="text-3xl font-bold text-rose-900">{chartData.monthlyTotal.toFixed(1)}</div>
-                    <div className="text-sm font-medium text-rose-600">Toplam Saat (6 Ay)</div>
+                    <div className="text-2xl font-bold" style={{ color: theme.hex }}>
+                      {monthlyTotalHuman6m}
+                    </div>
+                    <div className="text-sm font-medium" style={{ color: theme.hex }}>
+                      Toplam (6 Ay)
+                    </div>
                   </Card>
                 </div>
               </TabsContent>
@@ -964,57 +1728,213 @@ export default function Page() {
 
           {/* Settings */}
           <TabsContent value="settings" className="mt-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Uygulama Ayarları</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid gap-2">
-                  <Label>Günlük Hedef (Saat)</Label>
-                  <Input
-                    type="number"
-                    value={dailyTarget}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setDailyTarget(Number.isFinite(v) ? v : 0);
-                      setLocalUpdatedAt(Date.now());
-                    }}
-                    className="max-w-[200px]"
-                  />
-                </div>
-                <Separator />
-                <div>
-                  <h4 className="font-medium mb-2">Veri Yönetimi</h4>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={() => confirm("Tüm kayıtlar silinsin mi?") && (setSessions([]), setLocalUpdatedAt(Date.now()))}
-                    >
-                      <Trash2 className="mr-2 h-4 w-4" /> Tüm Kayıtları Sıfırla
-                    </Button>
-                  </div>
-                </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              
+              {/* Category Management */}
+              <Card className="shadow-sm md:col-span-2">
+                <CardHeader>
+                    <CardTitle className="text-base">Kategoriler</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-6">
+                        {categories.map(c => (
+                            <div key={c.id} className="flex items-center gap-2 p-3 border rounded-lg bg-white">
+                                <Input 
+                                    type="color" 
+                                    className="w-8 h-8 p-0 border-0 rounded-full cursor-pointer shrink-0"
+                                    value={c.color}
+                                    onChange={(e) => updateCategory(c.id, 'color', e.target.value)}
+                                />
+                                <Input 
+                                    value={c.name}
+                                    onChange={(e) => updateCategory(c.id, 'name', e.target.value)}
+                                    className="h-8 text-sm"
+                                />
+                                <Button 
+                                    variant="ghost" 
+                                    size="icon" 
+                                    className="h-8 w-8 text-slate-400 hover:text-red-500"
+                                    onClick={() => deleteCategory(c.id)}
+                                >
+                                    <X className="h-4 w-4" />
+                                </Button>
+                            </div>
+                        ))}
+                    </div>
 
-                <Separator />
-                <div className="text-xs text-muted-foreground">
-                  Yerel güncelleme: {localUpdatedAt ? new Date(localUpdatedAt).toLocaleString("tr-TR") : "-"}
-                </div>
-              </CardContent>
-            </Card>
+                    <div className="flex items-end gap-4 p-4 bg-slate-50 rounded-xl border border-dashed">
+                        <div className="space-y-1 flex-1">
+                            <Label>Yeni Kategori Adı</Label>
+                            <Input 
+                                placeholder="Örn: Yazılım" 
+                                value={newCatName} 
+                                onChange={(e) => setNewCatName(e.target.value)}
+                            />
+                        </div>
+                        <div className="space-y-1">
+                             <Label>Renk</Label>
+                             <div className="flex items-center gap-2">
+                                <div className="relative">
+                                    <Input 
+                                        type="color" 
+                                        value={newCatColor} 
+                                        onChange={(e) => setNewCatColor(e.target.value)}
+                                        className="w-10 h-10 p-1 rounded-lg cursor-pointer"
+                                    />
+                                </div>
+                             </div>
+                        </div>
+                        <Button onClick={addCategory} disabled={!newCatName.trim()}>
+                            <Plus className="mr-2 h-4 w-4" /> Ekle
+                        </Button>
+                    </div>
+                </CardContent>
+              </Card>
+
+              <Card className="shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">Hedefler</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-2">
+                    <Label>Günlük Hedef (Saat)</Label>
+                    <Input
+                      type="number"
+                      value={dailyTarget}
+                      min={0}
+                      step={0.25}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setDailyTarget(Number.isFinite(v) ? v : 0);
+                        setLocalUpdatedAt(Date.now());
+                      }}
+                      className="max-w-[200px]"
+                    />
+                    <div className="text-xs text-muted-foreground">
+                      Gösterimler “X saat Y dk” formatında. (Hedef dahil)
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">Veri & Dışa Aktarım</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <Button variant="outline" className="w-full justify-start" onClick={handleExportCSV}>
+                    <Download className="mr-2 h-4 w-4" /> Filtreli kayıtları CSV indir
+                  </Button>
+
+                  <Separator />
+
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium">Sıfırlama</div>
+
+                    <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+                      <DialogTrigger asChild>
+                        <Button variant="destructive" className="w-full justify-start">
+                          <Trash2 className="mr-2 h-4 w-4" /> Tüm kayıtları sil
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>Tüm kayıtlar silinsin mi?</DialogTitle>
+                          <DialogDescription>Bu işlem geri alınamaz. Tüm çalışma kayıtları kalıcı olarak silinir.</DialogDescription>
+                        </DialogHeader>
+
+                        <DialogFooter>
+                          <Button variant="outline" onClick={() => setResetOpen(false)}>
+                            Vazgeç
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            onClick={() => {
+                              setSessions([]);
+                              setLocalUpdatedAt(Date.now());
+                              setResetOpen(false);
+                            }}
+                          >
+                            Evet, sil
+                          </Button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+
+                  <Separator />
+
+                  <div className="text-xs text-muted-foreground">
+                    Yerel güncelleme: {localUpdatedAt ? new Date(localUpdatedAt).toLocaleString("tr-TR") : "-"}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           </TabsContent>
         </Tabs>
       </div>
 
-      {/* Mobile FAB */}
+      {/* Mobile Start FAB + Bottom Sheet */}
       <div className="fixed bottom-6 right-6 sm:hidden">
         {!running && (
-          <Button
-            size="icon"
-            className="h-14 w-14 rounded-full shadow-xl bg-indigo-600 hover:bg-indigo-700"
-            onClick={startSession}
-          >
-            <Play className="h-6 w-6 text-white" />
-          </Button>
+          <Dialog open={mobileStartOpen} onOpenChange={setMobileStartOpen}>
+            <DialogTrigger asChild>
+              <Button
+                size="icon"
+                className="h-14 w-14 rounded-full shadow-xl border-0 text-white"
+                style={{ backgroundColor: theme.hex }}
+              >
+                <Play className="h-6 w-6 text-white" />
+              </Button>
+            </DialogTrigger>
+
+            <DialogContent className="fixed bottom-0 left-0 right-0 translate-y-0 top-auto rounded-t-2xl p-4">
+              <DialogHeader>
+                <DialogTitle>Hızlı Başlat</DialogTitle>
+                <DialogDescription>Kategori seç, istersen etiket ekle ve başlat.</DialogDescription>
+              </DialogHeader>
+
+              <div className="grid gap-4 mt-2">
+                <div className="space-y-1">
+                  <Label className="text-xs font-semibold uppercase text-muted-foreground">Kategori</Label>
+                  <Select value={quickCat} onValueChange={setQuickCat}>
+                    <SelectTrigger className="h-12 bg-white dark:bg-slate-950 border-slate-200">
+                      <SelectValue placeholder={categories[0]?.name} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {categories.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          <span className="inline-flex items-center gap-2">
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: c.color }} />
+                            {c.name}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
+                  <Label className="text-xs font-semibold uppercase text-muted-foreground">Etiket</Label>
+                  <Input
+                    className="h-12 bg-white dark:bg-slate-950 border-slate-200"
+                    placeholder="Örn: Tez Yazımı"
+                    value={quickLabel}
+                    onChange={(e) => setQuickLabel(e.target.value)}
+                  />
+                </div>
+
+                <Button
+                  size="lg"
+                  className="h-12 rounded-xl shadow-lg border-0 text-white"
+                  style={{ backgroundColor: theme.hex }}
+                  onClick={startSession}
+                >
+                  <Play className="mr-2 h-5 w-5 fill-current" /> Başlat
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
         )}
       </div>
     </div>
