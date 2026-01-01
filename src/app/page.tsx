@@ -506,9 +506,9 @@ export default function Page() {
               <div className="bg-primary text-primary-foreground p-2 rounded-xl">
                 <Timer className="h-6 w-6" />
               </div>
-              Chronos
+              Çalışalım
             </h1>
-            <p className="text-muted-foreground mt-1">Zamanını yönet, üretkenliğini artır.</p>
+            <p className="text-muted-foreground mt-1"></p>
           </div>
 
           <div className="flex gap-2 items-center">
