@@ -487,7 +487,9 @@ export default function EnhancedApp() {
       setCloudMsg("Link gönderiliyor...");
       const { error } = await supabase.auth.signInWithOtp({
           email: authEmail,
-          options: { emailRedirectTo: window.location.origin }
+          options: {
+  emailRedirectTo: "https://calisalim.vercel.app"
+}
       });
       if(error) { alert(error.message); setCloudMsg("Hata"); }
       else { alert("Giriş linki e-postana gönderildi!"); setCloudMsg("E-postanı kontrol et"); }
