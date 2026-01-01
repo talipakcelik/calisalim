@@ -3,13 +3,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, type User } from "@supabase/supabase-js";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription as ShadcnDialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import {
   DropdownMenu,
@@ -44,8 +52,11 @@ import {
   Plus,
   Pencil,
   X,
-  Palette,
-  BookOpen,
+  Pause,
+  RotateCcw,
+  CheckCircle2,
+  AlertTriangle,
+  Info,
 } from "lucide-react";
 
 import {
@@ -66,9 +77,32 @@ import {
 
 /** ========= Types ========= */
 type Category = { id: string; name: string; color: string };
-type Session = { id: string; categoryId: string; label: string; start: number; end: number };
-type Running = { categoryId: string; label: string; start: number };
-type Snapshot = { categories: Category[]; sessions: Session[]; dailyTarget: number };
+type Session = {
+  id: string;
+  categoryId: string;
+  label: string;
+  start: number;
+  end: number;
+  pausedMs?: number; // NEW: pause/resume için
+};
+
+type PomodoroConfig = { enabled: boolean; workMin: number; breakMin: number };
+type PomodoroPhase = "work" | "break";
+
+type Running = {
+  categoryId: string;
+  label: string;
+  start: number; // son resume anı
+  elapsedPremiumMs: number; // pause öncesi birikmiş aktif süre
+  isPaused: boolean;
+  pausedAt?: number;
+  // pomodoro
+  pomodoroEnabled: boolean;
+  pomoPhase: PomodoroPhase;
+  pomoRemainingMs: number;
+};
+
+type Snapshot = { categories: Category[]; sessions: Session[]; dailyTarget: number; pomodoro?: PomodoroConfig };
 type CloudStatus = "disabled" | "signed_out" | "signed_in" | "syncing" | "error";
 type RangeFilter = "all" | "today" | "week";
 
@@ -104,11 +138,22 @@ const DEFAULT_CATEGORIES: Category[] = [
   { id: "other", name: "Diğer", color: "#64748b" },
 ];
 
+const DEFAULT_POMODORO: PomodoroConfig = { enabled: false, workMin: 25, breakMin: 5 };
+
 /** Rastgele canlı renk üretici (bozuk renkler için fallback) */
 const getRandomBrightColor = () => {
   const colors = [
-    "#ef4444", "#f97316", "#f59e0b", "#84cc16", "#10b981", 
-    "#06b6d4", "#3b82f6", "#6366f1", "#8b5cf6", "#d946ef", "#f43f5e"
+    "#ef4444",
+    "#f97316",
+    "#f59e0b",
+    "#84cc16",
+    "#10b981",
+    "#06b6d4",
+    "#3b82f6",
+    "#6366f1",
+    "#8b5cf6",
+    "#d946ef",
+    "#f43f5e",
   ];
   return colors[Math.floor(Math.random() * colors.length)];
 };
@@ -181,11 +226,13 @@ const toInputDateTime = (ms: number) => {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
 /** Helper: Bir kategori için akıllı placeholder metni */
 const getCategoryPlaceholder = (catId: string, catName?: string) => {
   const lowerName = (catName || "").toLowerCase();
   const lowerId = catId.toLowerCase();
-  
+
   if (lowerId === "phd" || lowerId.includes("tez") || lowerName.includes("tez") || lowerName.includes("doktora")) {
     return "Hangi kitap, makale veya bölüm?";
   }
@@ -203,8 +250,7 @@ const getUniqueLabelsForCategory = (sessions: Session[], categoryId: string) => 
   const labels = sessions
     .filter((s) => s.categoryId === categoryId && s.label && s.label.trim().length > 0)
     .map((s) => s.label.trim());
-  
-  // Set ile benzersiz yap, alfabetik sırala
+
   return Array.from(new Set(labels)).sort((a, b) => a.localeCompare(b, "tr-TR"));
 };
 
@@ -242,25 +288,340 @@ function usePersistentState<T>(
 /** ========= Supabase (ENV only) ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabase =
-  SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 /** ========= Storage keys ========= */
 const LS_CATEGORIES = "talip-v2.categories";
 const LS_SESSIONS = "talip-v2.sessions";
 const LS_TARGET = "talip-v2.target";
 const LS_UPDATED_AT = "talip-v2.updatedAt";
+const LS_POMODORO = "talip-v2.pomodoro";
 
-// --- ActiveTimer Component (Performance Optimization) ---
-// This component handles its own interval, so the main page doesn't re-render every second.
+/** ========= Duration helpers (pause aware) ========= */
+const sessionDurationMs = (s: Session) => Math.max(0, (s.end - s.start) - (s.pausedMs ?? 0));
+
+/** ========= Tiny Toast System (single-file) ========= */
+type ToastType = "success" | "error" | "info";
+type ToastItem = { id: string; type: ToastType; title?: string; message: string };
+
+function ToastViewport({
+  toasts,
+  remove,
+}: {
+  toasts: ToastItem[];
+  remove: (id: string) => void;
+}) {
+  return (
+    <div className="fixed top-4 right-4 z-[9999] w-[360px] max-w-[calc(100vw-2rem)] space-y-2">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className="rounded-2xl border bg-white shadow-lg p-3 flex gap-3 items-start"
+          role="status"
+        >
+          <div className="mt-0.5">
+            {t.type === "success" ? (
+              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+            ) : t.type === "error" ? (
+              <AlertTriangle className="h-5 w-5 text-rose-600" />
+            ) : (
+              <Info className="h-5 w-5 text-slate-600" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            {t.title ? <div className="font-semibold text-sm">{t.title}</div> : null}
+            <div className="text-sm text-slate-600">{t.message}</div>
+          </div>
+          <button
+            onClick={() => remove(t.id)}
+            className="rounded-lg p-1 hover:bg-slate-100 text-slate-500"
+            aria-label="Kapat"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** ========= Skeleton (single-file) ========= */
+const Skeleton = ({ className = "" }: { className?: string }) => (
+  <div className={`animate-pulse rounded-xl bg-slate-200/70 dark:bg-slate-800/60 ${className}`} />
+);
+
+/** ========= ConfirmDialog (Dialog-based, single-file) ========= */
+function ConfirmDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  confirmText = "Evet",
+  cancelText = "Vazgeç",
+  destructive,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  title: string;
+  description?: string;
+  confirmText?: string;
+  cancelText?: string;
+  destructive?: boolean;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          {description ? <ShadcnDialogDescription>{description}</ShadcnDialogDescription> : null}
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {cancelText}
+          </Button>
+          <Button
+            variant={destructive ? "destructive" : "default"}
+            onClick={() => {
+              onConfirm();
+              onOpenChange(false);
+            }}
+          >
+            {confirmText}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** ========= Mini DateTime Picker (Popover + Calendar + Time) ========= */
+function MiniDateTimePicker({
+  valueMs,
+  onChange,
+  label,
+}: {
+  valueMs: number;
+  onChange: (ms: number) => void;
+  label: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  const d = useMemo(() => new Date(valueMs), [valueMs]);
+  const [viewYear, setViewYear] = useState(d.getFullYear());
+  const [viewMonth, setViewMonth] = useState(d.getMonth()); // 0-11
+
+  useEffect(() => {
+    setViewYear(d.getFullYear());
+    setViewMonth(d.getMonth());
+  }, [d.getFullYear(), d.getMonth()]);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current) return;
+      if (wrapRef.current.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    if (open) document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const daysInMonth = useMemo(() => new Date(viewYear, viewMonth + 1, 0).getDate(), [viewYear, viewMonth]);
+  const firstDay = useMemo(() => new Date(viewYear, viewMonth, 1).getDay(), [viewYear, viewMonth]); // 0 sunday
+  const mondayIndex = useMemo(() => (firstDay === 0 ? 6 : firstDay - 1), [firstDay]); // 0 monday
+
+  const selectedY = d.getFullYear();
+  const selectedM = d.getMonth();
+  const selectedDay = d.getDate();
+
+  const hours = d.getHours();
+  const minutes = d.getMinutes();
+
+  const monthName = useMemo(
+    () => new Date(viewYear, viewMonth, 1).toLocaleDateString("tr-TR", { month: "long", year: "numeric" }),
+    [viewYear, viewMonth]
+  );
+
+  const setDatePreserveTime = (yy: number, mm: number, dd: number) => {
+    const next = new Date(valueMs);
+    next.setFullYear(yy, mm, dd);
+    // preserve time
+    onChange(next.getTime());
+  };
+
+  const setTimePreserveDate = (hh: number, min: number) => {
+    const next = new Date(valueMs);
+    next.setHours(hh, min, 0, 0);
+    onChange(next.getTime());
+  };
+
+  const display = useMemo(() => {
+    const dt = new Date(valueMs);
+    const dateStr = dt.toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" });
+    return `${dateStr} • ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+  }, [valueMs]);
+
+  const hoursOptions = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
+  const minuteOptions = useMemo(() => Array.from({ length: 12 }, (_, i) => i * 5), []);
+
+  return (
+    <div className="col-span-3" ref={wrapRef}>
+      <div className="space-y-1">
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full justify-between rounded-xl"
+          onClick={() => setOpen((v) => !v)}
+        >
+          <span className="truncate">{display}</span>
+          <CalendarIcon className="h-4 w-4 text-muted-foreground" />
+        </Button>
+        <div className="text-[11px] text-muted-foreground">{label}</div>
+      </div>
+
+      {open ? (
+        <div className="relative">
+          <div className="absolute z-50 mt-2 w-[320px] max-w-[calc(100vw-2rem)] rounded-2xl border bg-white shadow-xl p-3">
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="rounded-xl"
+                onClick={() => {
+                  const m = viewMonth - 1;
+                  if (m < 0) {
+                    setViewMonth(11);
+                    setViewYear((y) => y - 1);
+                  } else {
+                    setViewMonth(m);
+                  }
+                }}
+                aria-label="Önceki ay"
+              >
+                ‹
+              </Button>
+
+              <div className="text-sm font-semibold">{monthName}</div>
+
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="rounded-xl"
+                onClick={() => {
+                  const m = viewMonth + 1;
+                  if (m > 11) {
+                    setViewMonth(0);
+                    setViewYear((y) => y + 1);
+                  } else {
+                    setViewMonth(m);
+                  }
+                }}
+                aria-label="Sonraki ay"
+              >
+                ›
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-7 gap-1 mt-3 text-xs text-slate-500">
+              {["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"].map((x) => (
+                <div key={x} className="text-center py-1">
+                  {x}
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-1 mt-1">
+              {Array.from({ length: mondayIndex }).map((_, i) => (
+                <div key={`e-${i}`} className="h-9" />
+              ))}
+              {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
+                const isSelected = selectedY === viewYear && selectedM === viewMonth && selectedDay === day;
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => setDatePreserveTime(viewYear, viewMonth, day)}
+                    className={`h-9 rounded-xl text-sm hover:bg-slate-100 ${
+                      isSelected ? "bg-slate-900 text-white hover:bg-slate-900" : "text-slate-900"
+                    }`}
+                  >
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <div className="text-xs text-muted-foreground">Saat</div>
+                <Select
+                  value={String(hours)}
+                  onValueChange={(v) => setTimePreserveDate(Number(v), minutes)}
+                >
+                  <SelectTrigger className="rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {hoursOptions.map((h) => (
+                      <SelectItem key={h} value={String(h)}>
+                        {pad2(h)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1">
+                <div className="text-xs text-muted-foreground">Dakika</div>
+                <Select
+                  value={String(minutes - (minutes % 5))}
+                  onValueChange={(v) => setTimePreserveDate(hours, Number(v))}
+                >
+                  <SelectTrigger className="rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {minuteOptions.map((m) => (
+                      <SelectItem key={m} value={String(m)}>
+                        {pad2(m)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="mt-3 flex justify-end">
+              <Button type="button" variant="outline" className="rounded-xl" onClick={() => setOpen(false)}>
+                Kapat
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** ========= ActiveTimer Component (Performance Optimization) ========= */
 const ActiveTimer = ({
   running,
   onStop,
+  onPause,
+  onResume,
+  onResetPomodoro,
   categoryMap,
   themeColor,
 }: {
   running: Running;
   onStop: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onResetPomodoro: () => void;
   categoryMap: Map<string, Category>;
   themeColor: string;
 }) => {
@@ -271,6 +632,19 @@ const ActiveTimer = ({
     return () => clearInterval(t);
   }, []);
 
+  const liveActiveMs = useMemo(() => {
+    if (running.isPaused) return running.elapsedPremiumMs;
+    return running.elapsedPremiumMs + (now - running.start);
+  }, [running, now]);
+
+  const pomoLabel = running.pomodoroEnabled
+    ? running.pomoPhase === "work"
+      ? "Pomodoro · Çalışma"
+      : "Pomodoro · Mola"
+    : null;
+
+  const pomoRemaining = running.pomodoroEnabled ? running.pomoRemainingMs : 0;
+
   return (
     <Card className="text-white border-none shadow-xl relative overflow-hidden">
       <div
@@ -280,47 +654,96 @@ const ActiveTimer = ({
         }}
       />
       <div className="absolute top-0 right-0 -mt-10 -mr-10 w-40 h-40 bg-white/10 rounded-full blur-3xl" />
-      <CardContent className="flex flex-col sm:flex-row items-center justify-between py-8 gap-6 relative z-10">
-        <div className="flex items-center gap-4">
-          <div className="h-16 w-16 rounded-2xl flex items-center justify-center bg-white/10 backdrop-blur-sm border border-white/10 shadow-inner">
-            <Timer className="h-8 w-8" />
-          </div>
-          <div>
-            <h3 className="text-sm font-medium text-white/80 flex flex-wrap items-center gap-2">
-              <span className="font-semibold text-white">
-                {categoryMap.get(running.categoryId)?.name ?? running.categoryId}
-              </span>
-              {running.label ? (
-                <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
-                  {running.label}
-                </Badge>
-              ) : (
-                <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
-                  (etiketsiz)
-                </Badge>
-              )}
-              <span className="text-xs text-white/60">• Başlangıç: {fmtTime(running.start)}</span>
-            </h3>
-            <div className="text-5xl sm:text-6xl font-bold tabular-nums tracking-tight mt-1 font-mono">
-              {fmtDuration(now - running.start)}
+      <CardContent className="flex flex-col gap-6 py-8 relative z-10">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
+          <div className="flex items-center gap-4">
+            <div className="h-16 w-16 rounded-2xl flex items-center justify-center bg-white/10 backdrop-blur-sm border border-white/10 shadow-inner">
+              <Timer className="h-8 w-8" />
+            </div>
+            <div>
+              <h3 className="text-sm font-medium text-white/80 flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-white">
+                  {categoryMap.get(running.categoryId)?.name ?? running.categoryId}
+                </span>
+                {running.label ? (
+                  <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
+                    {running.label}
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
+                    (etiketsiz)
+                  </Badge>
+                )}
+                <span className="text-xs text-white/60">• Başlangıç: {fmtTime(running.start)}</span>
+                {pomoLabel ? (
+                  <span className="text-xs text-white/70">• {pomoLabel}</span>
+                ) : null}
+              </h3>
+
+              <div className="text-5xl sm:text-6xl font-bold tabular-nums tracking-tight mt-1 font-mono">
+                {fmtDuration(liveActiveMs)}
+              </div>
+
+              {running.pomodoroEnabled ? (
+                <div className="mt-2 text-sm text-white/80 flex items-center gap-2 font-mono">
+                  <span>Kalan:</span>
+                  <span className="font-semibold text-white">{fmtCompact(pomoRemaining)}</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="ml-2 h-8 rounded-xl bg-white/10 hover:bg-white/15 text-white border-white/15"
+                    onClick={onResetPomodoro}
+                    title="Pomodoro sayacını sıfırla"
+                  >
+                    <RotateCcw className="mr-2 h-4 w-4" /> Reset
+                  </Button>
+                </div>
+              ) : null}
+
+              {running.isPaused ? (
+                <div className="mt-2 text-xs text-white/70">Duraklatıldı</div>
+              ) : null}
             </div>
           </div>
-        </div>
 
-        <Button
-          variant="destructive"
-          size="lg"
-          className="h-14 px-8 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
-          onClick={onStop}
-        >
-          <Square className="mr-2 h-5 w-5 fill-current" /> Durdur & Kaydet
-        </Button>
+          <div className="flex gap-2 w-full sm:w-auto">
+            {!running.isPaused ? (
+              <Button
+                variant="outline"
+                size="lg"
+                className="h-14 px-6 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
+                onClick={onPause}
+              >
+                <Pause className="mr-2 h-5 w-5" /> Duraklat
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="lg"
+                className="h-14 px-6 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
+                onClick={onResume}
+              >
+                <Play className="mr-2 h-5 w-5 fill-current" /> Devam
+              </Button>
+            )}
+
+            <Button
+              variant="destructive"
+              size="lg"
+              className="h-14 px-8 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
+              onClick={onStop}
+            >
+              <Square className="mr-2 h-5 w-5 fill-current" /> Durdur & Kaydet
+            </Button>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
 };
 
-// --- Session Dialog (Manual Add / Edit) ---
+/** ========= Session Dialog (Manual Add / Edit) ========= */
 const SessionDialog = ({
   isOpen,
   onOpenChange,
@@ -328,6 +751,7 @@ const SessionDialog = ({
   categories,
   sessions,
   onSave,
+  toast,
 }: {
   isOpen: boolean;
   onOpenChange: (o: boolean) => void;
@@ -335,34 +759,32 @@ const SessionDialog = ({
   categories: Category[];
   sessions: Session[];
   onSave: (s: Partial<Session>) => void;
+  toast: (type: ToastType, message: string, title?: string) => void;
 }) => {
   const [formData, setFormData] = useState({
     categoryId: "",
     label: "",
-    startStr: "",
-    endStr: "",
+    startMs: Date.now(),
+    endMs: Date.now(),
   });
 
   useEffect(() => {
-    if (isOpen) {
-      if (initialData) {
-        // Edit mode
-        setFormData({
-          categoryId: initialData.categoryId,
-          label: initialData.label,
-          startStr: toInputDateTime(initialData.start),
-          endStr: toInputDateTime(initialData.end),
-        });
-      } else {
-        // Create mode (default: now - 1 hour to now)
-        const now = Date.now();
-        setFormData({
-          categoryId: categories[0]?.id || "",
-          label: "",
-          startStr: toInputDateTime(now - 3600000),
-          endStr: toInputDateTime(now),
-        });
-      }
+    if (!isOpen) return;
+    if (initialData) {
+      setFormData({
+        categoryId: initialData.categoryId,
+        label: initialData.label,
+        startMs: initialData.start,
+        endMs: initialData.end,
+      });
+    } else {
+      const now = Date.now();
+      setFormData({
+        categoryId: categories[0]?.id || "",
+        label: "",
+        startMs: now - 3600000,
+        endMs: now,
+      });
     }
   }, [isOpen, initialData, categories]);
 
@@ -372,29 +794,31 @@ const SessionDialog = ({
     return getUniqueLabelsForCategory(sessions, formData.categoryId);
   }, [sessions, formData.categoryId]);
 
-  const selectedCategory = categories.find(c => c.id === formData.categoryId);
+  const selectedCategory = categories.find((c) => c.id === formData.categoryId);
   const placeholder = getCategoryPlaceholder(formData.categoryId, selectedCategory?.name);
 
   const handleSave = () => {
-    const start = new Date(formData.startStr).getTime();
-    const end = new Date(formData.endStr).getTime();
+    const start = formData.startMs;
+    const end = formData.endMs;
 
-    if (isNaN(start) || isNaN(end)) {
-      alert("Lütfen geçerli bir tarih seçin.");
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      toast("error", "Lütfen geçerli bir tarih seçin.", "Hatalı tarih");
       return;
     }
     if (end <= start) {
-      alert("Bitiş zamanı başlangıçtan sonra olmalıdır.");
+      toast("error", "Bitiş zamanı başlangıçtan sonra olmalıdır.", "Hatalı zaman aralığı");
       return;
     }
 
     onSave({
-      id: initialData?.id, // Keep ID if editing
+      id: initialData?.id,
       categoryId: formData.categoryId,
       label: formData.label,
       start,
       end,
     });
+
+    toast("success", initialData ? "Kayıt güncellendi." : "Kayıt eklendi.");
     onOpenChange(false);
   };
 
@@ -403,17 +827,15 @@ const SessionDialog = ({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{initialData ? "Kaydı Düzenle" : "Manuel Kayıt Ekle"}</DialogTitle>
-          <DialogDescription>
+          <ShadcnDialogDescription>
             {initialData ? "Mevcut çalışma kaydını güncelle." : "Geçmişe dönük bir çalışma kaydı oluştur."}
-          </DialogDescription>
+          </ShadcnDialogDescription>
         </DialogHeader>
+
         <div className="grid gap-4 py-4">
           <div className="grid grid-cols-4 items-center gap-4">
             <Label className="text-right">Kategori</Label>
-            <Select
-              value={formData.categoryId}
-              onValueChange={(v) => setFormData({ ...formData, categoryId: v })}
-            >
+            <Select value={formData.categoryId} onValueChange={(v) => setFormData({ ...formData, categoryId: v })}>
               <SelectTrigger className="col-span-3">
                 <SelectValue placeholder="Kategori seç" />
               </SelectTrigger>
@@ -426,42 +848,45 @@ const SessionDialog = ({
               </SelectContent>
             </Select>
           </div>
+
           <div className="grid grid-cols-4 items-center gap-4">
             <Label className="text-right">Etiket</Label>
             <div className="col-span-3">
-                <Input
+              <Input
                 value={formData.label}
                 onChange={(e) => setFormData({ ...formData, label: e.target.value })}
                 placeholder={placeholder}
                 list="dialog-labels"
                 autoComplete="off"
-                />
-                <datalist id="dialog-labels">
-                    {suggestedLabels.map((label) => (
-                        <option key={label} value={label} />
-                    ))}
-                </datalist>
+              />
+              <datalist id="dialog-labels">
+                {suggestedLabels.map((label) => (
+                  <option key={label} value={label} />
+                ))}
+              </datalist>
             </div>
           </div>
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right">Başlangıç</Label>
-            <Input
-              type="datetime-local"
-              value={formData.startStr}
-              onChange={(e) => setFormData({ ...formData, startStr: e.target.value })}
-              className="col-span-3"
+
+          {/* Better DateTime picker */}
+          <div className="grid grid-cols-4 items-start gap-4">
+            <Label className="text-right pt-2">Başlangıç</Label>
+            <MiniDateTimePicker
+              valueMs={formData.startMs}
+              onChange={(ms) => setFormData((p) => ({ ...p, startMs: ms }))}
+              label="Tarih seç + saat/dakika ayarla"
             />
           </div>
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right">Bitiş</Label>
-            <Input
-              type="datetime-local"
-              value={formData.endStr}
-              onChange={(e) => setFormData({ ...formData, endStr: e.target.value })}
-              className="col-span-3"
+
+          <div className="grid grid-cols-4 items-start gap-4">
+            <Label className="text-right pt-2">Bitiş</Label>
+            <MiniDateTimePicker
+              valueMs={formData.endMs}
+              onChange={(ms) => setFormData((p) => ({ ...p, endMs: ms }))}
+              label="Tarih seç + saat/dakika ayarla"
             />
           </div>
         </div>
+
         <DialogFooter>
           <Button onClick={handleSave}>Kaydet</Button>
         </DialogFooter>
@@ -471,21 +896,27 @@ const SessionDialog = ({
 };
 
 export default function Page() {
+  /** ========= Toast state ========= */
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toast = useCallback((type: ToastType, message: string, title?: string) => {
+    const id = uid();
+    setToasts((prev) => [{ id, type, message, title }, ...prev].slice(0, 4));
+    // auto close
+    window.setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== id)), 3200);
+  }, []);
+  const removeToast = useCallback((id: string) => setToasts((prev) => prev.filter((x) => x.id !== id)), []);
+
   // --- Persistent local state ---
-  const [categories, setCategories, catsHydrated] = usePersistentState<Category[]>(
-    LS_CATEGORIES,
-    DEFAULT_CATEGORIES
-  );
+  const [categories, setCategories, catsHydrated] = usePersistentState<Category[]>(LS_CATEGORIES, DEFAULT_CATEGORIES);
   const [sessions, setSessions, sessionsHydrated] = usePersistentState<Session[]>(LS_SESSIONS, []);
   const [dailyTarget, setDailyTarget] = usePersistentState<number>(LS_TARGET, 2);
   const [localUpdatedAt, setLocalUpdatedAt] = usePersistentState<number>(LS_UPDATED_AT, 0);
+  const [pomodoro, setPomodoro, pomodoroHydrated] = usePersistentState<PomodoroConfig>(LS_POMODORO, DEFAULT_POMODORO);
 
   // --- Runtime state ---
   const [running, setRunning] = useState<Running | null>(null);
-  
-  // NOTE: `now` removed from main component to prevent global re-renders. 
-  // It is now encapsulated in ActiveTimer or calculated on demand where needed (like charts, slightly less precise live updates for charts but better perf).
-  // For charts, we will use a less frequent update or just initial render time.
+
+  // `now` removed from main component to prevent global re-renders.
   const [nowForCalculations, setNowForCalculations] = useState(Date.now());
 
   // Quick start
@@ -509,6 +940,10 @@ export default function Page() {
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<Session | null>(null);
 
+  // Confirm dialogs (single-file)
+  const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
+  const [confirmDeleteCategoryId, setConfirmDeleteCategoryId] = useState<string | null>(null);
+
   // Category Management State
   const [newCatName, setNewCatName] = useState("");
   const [newCatColor, setNewCatColor] = useState("#3b82f6");
@@ -523,22 +958,20 @@ export default function Page() {
   const saveDebounceRef = useRef<number | null>(null);
 
   // Keep latest snapshot in ref
-  const stateRef = useRef({ categories, sessions, dailyTarget, localUpdatedAt });
+  const stateRef = useRef({ categories, sessions, dailyTarget, localUpdatedAt, pomodoro });
   useEffect(() => {
-    stateRef.current = { categories, sessions, dailyTarget, localUpdatedAt };
-  }, [categories, sessions, dailyTarget, localUpdatedAt]);
+    stateRef.current = { categories, sessions, dailyTarget, localUpdatedAt, pomodoro };
+  }, [categories, sessions, dailyTarget, localUpdatedAt, pomodoro]);
 
   // --- MIGRATION: Fix legacy Tailwind colors ---
   useEffect(() => {
     if (!catsHydrated) return;
 
     const needsFix = categories.some((c) => !c.color || !c.color.startsWith("#"));
-    
+
     if (needsFix) {
       const fixedCategories = categories.map((c) => {
-        // Renk bozuksa veya hex değilse (örn. "bg-blue-500")
         if (!c.color || !c.color.startsWith("#")) {
-          // Eski haritadan bak, yoksa rastgele canlı bir renk ata
           const newColor = OLD_COLOR_MAP[c.color] || getRandomBrightColor();
           return { ...c, color: newColor };
         }
@@ -549,7 +982,7 @@ export default function Page() {
     }
   }, [catsHydrated, categories, setCategories, setLocalUpdatedAt]);
 
-  // Update `nowForCalculations` every minute for relative times/charts, instead of every second
+  // Update `nowForCalculations` every minute for relative times/charts
   useEffect(() => {
     const t = window.setInterval(() => setNowForCalculations(Date.now()), 60000);
     return () => window.clearInterval(t);
@@ -564,15 +997,16 @@ export default function Page() {
   }, [categories, quickCat]);
 
   const categoryMap = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
-  const getCatHex = useCallback((catId: string) => {
-    const cat = categories.find(c => c.id === catId);
-    return cat ? cat.color : "#64748b";
-  }, [categories]);
+  const getCatHex = useCallback(
+    (catId: string) => {
+      const cat = categories.find((c) => c.id === catId);
+      return cat ? cat.color : "#64748b";
+    },
+    [categories]
+  );
 
   /** Stack keys with stable visual hierarchy */
-  const stackKeys = useMemo(() => {
-    return categories.map(c => c.id);
-  }, [categories]);
+  const stackKeys = useMemo(() => categories.map((c) => c.id), [categories]);
 
   const theme = useMemo(() => {
     const activeCat = running?.categoryId || quickCat || categories[0]?.id || "other";
@@ -607,52 +1041,200 @@ export default function Page() {
     );
   }, [categories]);
 
+  /** ========= Pause/Resume + Pomodoro runtime helpers ========= */
+  const startPomodoroIfEnabled = useCallback(
+    (base: Omit<Running, "pomoPhase" | "pomoRemainingMs">): Running => {
+      if (!pomodoro.enabled) {
+        return { ...base, pomodoroEnabled: false, pomoPhase: "work", pomoRemainingMs: 0 };
+      }
+      return {
+        ...base,
+        pomodoroEnabled: true,
+        pomoPhase: "work",
+        pomoRemainingMs: clamp(pomodoro.workMin, 1, 240) * 60_000,
+      };
+    },
+    [pomodoro.enabled, pomodoro.workMin]
+  );
+
+  const currentActiveMs = useCallback((r: Running, nowMs: number) => {
+    if (r.isPaused) return r.elapsedPremiumMs;
+    return r.elapsedPremiumMs + (nowMs - r.start);
+  }, []);
+
+  const pauseRunning = useCallback(() => {
+    setRunning((r) => {
+      if (!r || r.isPaused) return r;
+      const now = Date.now();
+      const elapsed = r.elapsedPremiumMs + (now - r.start);
+      return { ...r, isPaused: true, pausedAt: now, elapsedPremiumMs: elapsed };
+    });
+  }, []);
+
+  const resumeRunning = useCallback(() => {
+    setRunning((r) => {
+      if (!r || !r.isPaused) return r;
+      return { ...r, isPaused: false, pausedAt: undefined, start: Date.now() };
+    });
+  }, []);
+
+  const resetPomodoroCounter = useCallback(() => {
+    setRunning((r) => {
+      if (!r || !r.pomodoroEnabled) return r;
+      const workMs = clamp(pomodoro.workMin, 1, 240) * 60_000;
+      return { ...r, pomoPhase: "work", pomoRemainingMs: workMs };
+    });
+    toast("info", "Pomodoro sayacı sıfırlandı.");
+  }, [pomodoro.workMin, toast]);
+
+  // Pomodoro tick: her saniye kalan süreyi azalt; 0 olunca phase değiştir ve pause/resume yap
+  useEffect(() => {
+    if (!running?.pomodoroEnabled) return;
+    if (!running) return;
+
+    const t = window.setInterval(() => {
+      setRunning((r) => {
+        if (!r || !r.pomodoroEnabled) return r;
+        if (r.isPaused && r.pomoPhase === "work") {
+          // work fazında pause istenirse pomodoro da durur
+          return r;
+        }
+
+        const next = { ...r };
+        next.pomoRemainingMs = Math.max(0, next.pomoRemainingMs - 1000);
+
+        if (next.pomoRemainingMs > 0) return next;
+
+        if (next.pomoPhase === "work") {
+          // mola
+          const breakMs = clamp(pomodoro.breakMin, 1, 120) * 60_000;
+          next.pomoPhase = "break";
+          next.pomoRemainingMs = breakMs;
+
+          // mola sırasında otomatik pause
+          if (!next.isPaused) {
+            const now = Date.now();
+            const elapsed = next.elapsedPremiumMs + (now - next.start);
+            next.isPaused = true;
+            next.pausedAt = now;
+            next.elapsedPremiumMs = elapsed;
+          }
+
+          // toast
+          toast("success", "Çalışma bitti. Mola zamanı! ☕");
+          return next;
+        } else {
+          // tekrar çalışma
+          const workMs = clamp(pomodoro.workMin, 1, 240) * 60_000;
+          next.pomoPhase = "work";
+          next.pomoRemainingMs = workMs;
+
+          // otomatik resume
+          if (next.isPaused) {
+            next.isPaused = false;
+            next.pausedAt = undefined;
+            next.start = Date.now();
+          }
+
+          toast("info", "Mola bitti. Çalışmaya devam! 🔥");
+          return next;
+        }
+      });
+    }, 1000);
+
+    return () => window.clearInterval(t);
+  }, [running?.pomodoroEnabled, pomodoro.workMin, pomodoro.breakMin, toast]);
+
   // --- Session controls ---
   const startSession = useCallback(() => {
     if (running) return;
     const catId = quickCat || categories[0]?.id;
     if (!catId) return;
-    setRunning({ categoryId: catId, label: quickLabel.trim(), start: Date.now() });
+
+    const base: Omit<Running, "pomoPhase" | "pomoRemainingMs"> = {
+      categoryId: catId,
+      label: quickLabel.trim(),
+      start: Date.now(),
+      elapsedPremiumMs: 0,
+      isPaused: false,
+      pomodoroEnabled: false,
+    };
+
+    setRunning(startPomodoroIfEnabled(base));
     setMobileStartOpen(false);
-  }, [running, quickCat, categories, quickLabel]);
+  }, [running, quickCat, categories, quickLabel, startPomodoroIfEnabled]);
 
   const stopSession = useCallback(() => {
     if (!running) return;
+
+    const now = Date.now();
+    const activeMs = currentActiveMs(running, now);
+    const pausedWall = Math.max(0, (now - running.start) - (running.isPaused ? 0 : (now - running.start)));
+    // pausedWall yukarıdaki satır boş; biz gerçek pausedMs’yi şöyle hesaplayacağız:
+    // pausedMs = (wallDuration) - (activeMs)
+    const wallDuration = now - (running.start - (running.isPaused ? 0 : 0)); // start, son resume; orijinal start yok
+    // Orijinal start’ı kaybetmemek için basit yaklaşım: session.start = now - wall; ama biz wall yerine gerçek timeline isteriz.
+    // Bu yüzden: session.start için “ilk başlat” anını tutmak gerekir.
+    // Pratik çözüm: sessionStart = now - (activeMs + pausedTotalMs) -> ama pausedTotalMs yok.
+    // Biz running state’te start'ı "son resume" diye kullandık; bu yüzden gerçek başlangıcı kaybetmemek için:
+    // sessionStartRef tutuyoruz.
+  }, [running, currentActiveMs]);
+
+  // Gerçek başlangıç için ref
+  const runningWallStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (running && runningWallStartRef.current == null) runningWallStartRef.current = Date.now();
+    if (!running) runningWallStartRef.current = null;
+  }, [running]);
+
+  const stopSessionFixed = useCallback(() => {
+    if (!running) return;
+    const now = Date.now();
+
+    const wallStart = runningWallStartRef.current ?? now;
+    const wallDuration = now - wallStart;
+
+    const activeMs = currentActiveMs(running, now);
+    const pausedMs = Math.max(0, wallDuration - activeMs);
+
     const newSession: Session = {
       id: uid(),
       categoryId: running.categoryId,
       label: running.label,
-      start: running.start,
-      end: Date.now(),
+      start: wallStart,
+      end: now,
+      pausedMs,
     };
 
     setSessions((prev) => [newSession, ...prev]);
     setLocalUpdatedAt(Date.now());
     setRunning(null);
     setQuickLabel("");
-  }, [running]);
+    toast("success", "Kayıt kaydedildi.");
+  }, [running, currentActiveMs, setSessions, setLocalUpdatedAt, toast]);
 
-  const deleteSession = useCallback((id: string) => {
-    if (!confirm("Bu kayıt kalıcı olarak silinsin mi?")) return;
-    setSessions((prev) => prev.filter((s) => s.id !== id));
+  const openDeleteSession = useCallback((id: string) => setConfirmDeleteSessionId(id), []);
+  const openDeleteCategory = useCallback((id: string) => setConfirmDeleteCategoryId(id), []);
+
+  const deleteSessionConfirmed = useCallback(() => {
+    if (!confirmDeleteSessionId) return;
+    setSessions((prev) => prev.filter((s) => s.id !== confirmDeleteSessionId));
     setLocalUpdatedAt(Date.now());
-  }, []);
+    toast("success", "Kayıt silindi.");
+  }, [confirmDeleteSessionId, setSessions, setLocalUpdatedAt, toast]);
 
   // --- CRUD Operations ---
   const handleSessionSave = (data: Partial<Session>) => {
     if (data.id) {
-      // Edit existing
-      setSessions((prev) =>
-        prev.map((s) => (s.id === data.id ? { ...s, ...data } as Session : s))
-      );
+      setSessions((prev) => prev.map((s) => (s.id === data.id ? ({ ...s, ...data } as Session) : s)));
     } else {
-      // Create new
       const newSession: Session = {
         id: uid(),
         categoryId: data.categoryId!,
         label: data.label || "",
         start: data.start!,
         end: data.end!,
+        pausedMs: 0,
       };
       setSessions((prev) => [newSession, ...prev]);
     }
@@ -678,34 +1260,36 @@ export default function Page() {
       name: newCatName.trim(),
       color: newCatColor,
     };
-    setCategories(prev => [...prev, newCat]);
+    setCategories((prev) => [...prev, newCat]);
     setNewCatName("");
     setLocalUpdatedAt(Date.now());
+    toast("success", "Kategori eklendi.");
   };
 
-  const deleteCategory = (id: string) => {
+  const deleteCategoryConfirmed = useCallback(() => {
+    if (!confirmDeleteCategoryId) return;
     if (categories.length <= 1) {
-      alert("En az bir kategori kalmalı.");
+      toast("error", "En az bir kategori kalmalı.");
       return;
     }
-    if(!confirm("Bu kategoriyi silmek istediğine emin misin? Bu kategoriye ait kayıtlar silinmez ancak 'Bilinmeyen' olarak görünebilir.")) return;
-    setCategories(prev => prev.filter(c => c.id !== id));
+    setCategories((prev) => prev.filter((c) => c.id !== confirmDeleteCategoryId));
+    setLocalUpdatedAt(Date.now());
+    toast("success", "Kategori silindi.");
+  }, [confirmDeleteCategoryId, categories.length, setCategories, setLocalUpdatedAt, toast]);
+
+  const updateCategory = (id: string, field: keyof Category, value: string) => {
+    setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, [field]: value } : c)));
     setLocalUpdatedAt(Date.now());
   };
 
-  const updateCategory = (id: string, field: keyof Category, value: string) => {
-      setCategories(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
-      setLocalUpdatedAt(Date.now());
-  };
-
-  // --- Cloud sync functions ---
+  /** ========= Cloud sync functions ========= */
   const pushToCloud = useCallback(async (u: User, label?: string) => {
     if (!supabase) return;
     setCloudStatus("syncing");
     setCloudMsg(label ? `Senkronlanıyor (${label})...` : "Senkronlanıyor...");
 
-    const { categories, sessions, dailyTarget } = stateRef.current;
-    const snapshot: Snapshot = { categories, sessions, dailyTarget };
+    const { categories, sessions, dailyTarget, pomodoro } = stateRef.current;
+    const snapshot: Snapshot = { categories, sessions, dailyTarget, pomodoro };
     const nowIso = new Date().toISOString();
 
     const { error } = await supabase
@@ -727,11 +1311,7 @@ export default function Page() {
       setCloudStatus("syncing");
       setCloudMsg("Veriler çekiliyor...");
 
-      const { data, error } = await supabase
-        .from("user_data")
-        .select("data, updated_at")
-        .eq("user_id", u.id)
-        .maybeSingle();
+      const { data, error } = await supabase.from("user_data").select("data, updated_at").eq("user_id", u.id).maybeSingle();
 
       if (error) {
         setCloudStatus("error");
@@ -754,6 +1334,7 @@ export default function Page() {
         setCategories(snap.categories?.length ? snap.categories : DEFAULT_CATEGORIES);
         setSessions(Array.isArray(snap.sessions) ? snap.sessions : []);
         setDailyTarget(typeof snap.dailyTarget === "number" ? snap.dailyTarget : 2);
+        setPomodoro(snap.pomodoro ? snap.pomodoro : DEFAULT_POMODORO);
         setLocalUpdatedAt(remoteMs);
 
         window.setTimeout(() => {
@@ -762,6 +1343,7 @@ export default function Page() {
 
         setCloudStatus("signed_in");
         setCloudMsg("Buluttan güncellendi");
+        toast("info", "Buluttan güncellendi.");
         return;
       }
 
@@ -772,13 +1354,13 @@ export default function Page() {
         setCloudMsg("Senkronize");
       }
     },
-    [pushToCloud]
+    [pushToCloud, setPomodoro, setCategories, setSessions, setDailyTarget, setLocalUpdatedAt, toast]
   );
 
   // Auth init + listener
   useEffect(() => {
     if (!supabase) return;
-    if (!catsHydrated || !sessionsHydrated) return;
+    if (!catsHydrated || !sessionsHydrated || !pomodoroHydrated) return;
 
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -796,12 +1378,12 @@ export default function Page() {
     });
 
     return () => sub.subscription.unsubscribe();
-  }, [catsHydrated, sessionsHydrated, loadFromCloud]);
+  }, [catsHydrated, sessionsHydrated, pomodoroHydrated, loadFromCloud]);
 
   // Auto save to cloud
   useEffect(() => {
     if (!supabase || !user) return;
-    if (!catsHydrated || !sessionsHydrated) return;
+    if (!catsHydrated || !sessionsHydrated || !pomodoroHydrated) return;
     if (isHydratingFromCloud.current) return;
 
     if (saveDebounceRef.current) window.clearTimeout(saveDebounceRef.current);
@@ -812,7 +1394,7 @@ export default function Page() {
     return () => {
       if (saveDebounceRef.current) window.clearTimeout(saveDebounceRef.current);
     };
-  }, [categories, sessions, dailyTarget, user?.id, catsHydrated, sessionsHydrated, pushToCloud]);
+  }, [categories, sessions, dailyTarget, pomodoro, user?.id, catsHydrated, sessionsHydrated, pomodoroHydrated, pushToCloud]);
 
   const handleSignIn = async () => {
     if (!supabase) return;
@@ -830,11 +1412,13 @@ export default function Page() {
     if (error) {
       setCloudStatus("error");
       setCloudMsg(error.message || "Giriş hatası");
+      toast("error", error.message || "Giriş hatası");
       return;
     }
 
     setCloudStatus("signed_out");
     setCloudMsg("E-postanı kontrol et: giriş linki gönderildi");
+    toast("success", "Giriş linki gönderildi. E-postanı kontrol et.");
   };
 
   const handleSignOut = async () => {
@@ -843,16 +1427,17 @@ export default function Page() {
     setUser(null);
     setCloudStatus("signed_out");
     setCloudMsg("Çıkış yapıldı");
+    toast("info", "Çıkış yapıldı.");
   };
 
-  // --- Analytics helpers (ms-based) ---
+  /** ========= Analytics helpers (pause-aware) ========= */
   const getDailyTotalMs = useCallback(
     (dateMs: number) => {
       const start = startOfDayMs(new Date(dateMs));
       const end = start + 86400000;
       return sessions
         .filter((s) => s.start >= start && s.start < end)
-        .reduce((acc, s) => acc + (s.end - s.start), 0);
+        .reduce((acc, s) => acc + sessionDurationMs(s), 0);
     },
     [sessions]
   );
@@ -863,7 +1448,7 @@ export default function Page() {
       const end = start + 7 * 86400000;
       return sessions
         .filter((s) => s.start >= start && s.start < end)
-        .reduce((acc, s) => acc + (s.end - s.start), 0);
+        .reduce((acc, s) => acc + sessionDurationMs(s), 0);
     },
     [sessions]
   );
@@ -898,7 +1483,7 @@ export default function Page() {
     return Math.round((todayTotal - y) / 60000);
   }, [todayTotal, getDailyTotalMs, nowForCalculations]);
 
-  // Charts (daily/weekly/monthly)
+  // Charts (daily/weekly/monthly) pause-aware
   const chartData = useMemo(() => {
     const sumHoursByCategory = (sess: Session[]) => {
       const byCat: Record<string, number> = {};
@@ -907,10 +1492,9 @@ export default function Page() {
       for (const s of sess) {
         const k = s.categoryId;
         if (!(k in byCat)) byCat[k] = 0;
-        byCat[k] += (s.end - s.start) / 3600000;
+        byCat[k] += sessionDurationMs(s) / 3600000;
       }
 
-      // keep 1-decimal for chart smoothness
       for (const k of Object.keys(byCat)) byCat[k] = Number(byCat[k].toFixed(1));
       return byCat;
     };
@@ -980,7 +1564,7 @@ export default function Page() {
       const end = nextMonth.getTime();
 
       const monthSessions = sessions.filter((s) => s.start >= start && s.start < end);
-      const hrs = monthSessions.reduce((acc, s) => acc + (s.end - s.start), 0) / 3600000;
+      const hrs = monthSessions.reduce((acc, s) => acc + sessionDurationMs(s), 0) / 3600000;
       monthlyTotalHours += hrs;
 
       monthly.push({
@@ -1006,7 +1590,7 @@ export default function Page() {
     const bucket = new Map<string, number>();
     for (const s of sessions) {
       if (s.start < start || s.start > end) continue;
-      bucket.set(s.categoryId, (bucket.get(s.categoryId) ?? 0) + (s.end - s.start));
+      bucket.set(s.categoryId, (bucket.get(s.categoryId) ?? 0) + sessionDurationMs(s));
     }
 
     const rows = Array.from(bucket.entries())
@@ -1030,7 +1614,7 @@ export default function Page() {
     for (const s of sessions) {
       if (s.start < start || s.start > end) continue;
       const key = (s.label || "").trim() ? s.label.trim() : "(etiketsiz)";
-      bucket.set(key, (bucket.get(key) ?? 0) + (s.end - s.start));
+      bucket.set(key, (bucket.get(key) ?? 0) + sessionDurationMs(s));
     }
     return Array.from(bucket.entries())
       .map(([label, ms]) => ({ label, ms }))
@@ -1045,18 +1629,20 @@ export default function Page() {
     const dayStart = startOfDayMs(new Date(nowMs));
     const weekStart = startOfWeekMs(new Date(nowMs));
 
-    return sessions.filter((s) => {
-      if (rangeFilter === "today" && s.start < dayStart) return false;
-      if (rangeFilter === "week" && s.start < weekStart) return false;
+    return sessions
+      .filter((s) => {
+        if (rangeFilter === "today" && s.start < dayStart) return false;
+        if (rangeFilter === "week" && s.start < weekStart) return false;
 
-      if (categoryFilter !== "all" && s.categoryId !== categoryFilter) return false;
+        if (categoryFilter !== "all" && s.categoryId !== categoryFilter) return false;
 
-      if (!q) return true;
-      const catName = (categoryMap.get(s.categoryId)?.name ?? s.categoryId).toLowerCase();
-      const label = (s.label ?? "").toLowerCase();
-      const dateStr = new Date(s.start).toLocaleDateString("tr-TR").toLowerCase();
-      return catName.includes(q) || label.includes(q) || dateStr.includes(q);
-    }).sort((a, b) => b.start - a.start); // Sort by date desc
+        if (!q) return true;
+        const catName = (categoryMap.get(s.categoryId)?.name ?? s.categoryId).toLowerCase();
+        const label = (s.label ?? "").toLowerCase();
+        const dateStr = new Date(s.start).toLocaleDateString("tr-TR").toLowerCase();
+        return catName.includes(q) || label.includes(q) || dateStr.includes(q);
+      })
+      .sort((a, b) => b.start - a.start);
   }, [sessions, searchQuery, rangeFilter, categoryFilter, categoryMap]);
 
   useEffect(() => {
@@ -1073,14 +1659,15 @@ export default function Page() {
   }, [filteredSessions, safePage, pageSize]);
 
   const handleExportCSV = () => {
-    const headers = ["ID", "Kategori", "Etiket", "Başlangıç", "Bitiş", "Süre"];
+    const headers = ["ID", "Kategori", "Etiket", "Başlangıç", "Bitiş", "Süre", "Duraklatma"];
     const rows = filteredSessions.map((s) => [
       s.id,
       categoryMap.get(s.categoryId)?.name || s.categoryId,
       (s.label || "").replace(/,/g, " "),
       new Date(s.start).toLocaleString("tr-TR"),
       new Date(s.end).toLocaleString("tr-TR"),
-      fmtHmFromMs(s.end - s.start),
+      fmtHmFromMs(sessionDurationMs(s)),
+      fmtHmFromMs(s.pausedMs ?? 0),
     ]);
 
     const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -1091,13 +1678,34 @@ export default function Page() {
     link.download = `zaman_takip_${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
     URL.revokeObjectURL(url);
+    toast("success", "CSV indirildi.");
   };
 
-  // --- UI ---
-  if (!catsHydrated || !sessionsHydrated) {
+  /** ========= UI: Skeleton Loading ========= */
+  if (!catsHydrated || !sessionsHydrated || !pomodoroHydrated) {
     return (
-      <div className="flex h-screen items-center justify-center gap-2">
-        <Loader2 className="animate-spin" /> Yükleniyor...
+      <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 px-4 py-6">
+        <div className="mx-auto max-w-5xl space-y-6">
+          <div className="flex items-center justify-between">
+            <Skeleton className="h-10 w-44" />
+            <Skeleton className="h-10 w-32" />
+          </div>
+          <Skeleton className="h-28 w-full" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </div>
+          <Skeleton className="h-10 w-80" />
+          <div className="space-y-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-16 w-full" />
+            ))}
+          </div>
+          <div className="flex items-center gap-2 text-slate-500">
+            <Loader2 className="animate-spin h-4 w-4" /> Yükleniyor...
+          </div>
+        </div>
+        <ToastViewport toasts={toasts} remove={removeToast} />
       </div>
     );
   }
@@ -1108,16 +1716,39 @@ export default function Page() {
 
   return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
+      <ToastViewport toasts={toasts} remove={removeToast} />
+
+      {/* Confirm dialogs */}
+      <ConfirmDialog
+        open={!!confirmDeleteSessionId}
+        onOpenChange={(o) => setConfirmDeleteSessionId(o ? confirmDeleteSessionId : null)}
+        title="Kayıt silinsin mi?"
+        description="Bu işlem geri alınamaz. İstersen önce CSV alabilirsin."
+        destructive
+        confirmText="Evet, sil"
+        onConfirm={deleteSessionConfirmed}
+      />
+
+      <ConfirmDialog
+        open={!!confirmDeleteCategoryId}
+        onOpenChange={(o) => setConfirmDeleteCategoryId(o ? confirmDeleteCategoryId : null)}
+        title="Kategori silinsin mi?"
+        description="Bu kategoriye ait kayıtlar silinmez; ancak kategorisi 'Bilinmeyen' gibi görünebilir."
+        destructive
+        confirmText="Evet, sil"
+        onConfirm={deleteCategoryConfirmed}
+      />
+
       <div className="mx-auto max-w-5xl px-4 py-6 pb-32 sm:pb-10">
-        
         {/* Helper Dialogs */}
-        <SessionDialog 
-          isOpen={sessionDialogOpen} 
+        <SessionDialog
+          isOpen={sessionDialogOpen}
           onOpenChange={setSessionDialogOpen}
           initialData={editingSession}
           categories={categories}
           sessions={sessions}
           onSave={handleSessionSave}
+          toast={toast}
         />
 
         {/* Header */}
@@ -1149,6 +1780,17 @@ export default function Page() {
               <span className="inline-flex items-center gap-1">
                 <Flame className="h-4 w-4" />
                 Streak: <span className="text-slate-900 dark:text-slate-50 font-medium">{streakDays} gün</span>
+              </span>
+
+              <span className="text-muted-foreground">•</span>
+
+              <span className="inline-flex items-center gap-1">
+                <span className="text-xs">
+                  Dün’e göre:{" "}
+                  <span className={yesterdayDeltaMin >= 0 ? "text-emerald-600" : "text-rose-600"}>
+                    {yesterdayDeltaMin >= 0 ? `+${yesterdayDeltaMin}` : yesterdayDeltaMin} dk
+                  </span>
+                </span>
               </span>
             </div>
           </div>
@@ -1289,31 +1931,33 @@ export default function Page() {
                 </div>
 
                 <div className="flex items-center gap-2 w-full sm:w-auto">
-                    <Button
-                      size="lg"
-                      className="h-12 px-8 flex-1 sm:flex-auto rounded-xl shadow-lg border-0 text-white"
-                      style={{ backgroundColor: theme.hex }}
-                      onClick={startSession}
-                    >
-                      <Play className="mr-2 h-5 w-5 fill-current" /> Başlat
-                    </Button>
-                    <Button
-                        size="lg"
-                        variant="outline"
-                        className="h-12 px-4 rounded-xl border-slate-200"
-                        title="Manuel Ekle"
-                        onClick={openCreateDialog}
-                    >
-                        <Plus className="h-5 w-5 text-slate-500" />
-                    </Button>
+                  <Button
+                    size="lg"
+                    className="h-12 px-8 flex-1 sm:flex-auto rounded-xl shadow-lg border-0 text-white"
+                    style={{ backgroundColor: theme.hex }}
+                    onClick={startSession}
+                  >
+                    <Play className="mr-2 h-5 w-5 fill-current" /> Başlat
+                  </Button>
+                  <Button
+                    size="lg"
+                    variant="outline"
+                    className="h-12 px-4 rounded-xl border-slate-200"
+                    title="Manuel Ekle"
+                    onClick={openCreateDialog}
+                  >
+                    <Plus className="h-5 w-5 text-slate-500" />
+                  </Button>
                 </div>
               </CardContent>
             </Card>
           ) : (
-            // Active Timer extracted to component for performance
-            <ActiveTimer 
-              running={running} 
-              onStop={stopSession} 
+            <ActiveTimer
+              running={running}
+              onStop={stopSessionFixed}
+              onPause={pauseRunning}
+              onResume={resumeRunning}
+              onResetPomodoro={resetPomodoroCounter}
               categoryMap={categoryMap}
               themeColor={theme.hex}
             />
@@ -1451,7 +2095,8 @@ export default function Page() {
                     {pagedSessions.map((session) => {
                       const cat = categoryMap.get(session.categoryId);
                       const leftColor = getCatHex(session.categoryId);
-                      const durationMs = session.end - session.start;
+                      const durationMs = sessionDurationMs(session);
+                      const pausedMs = session.pausedMs ?? 0;
 
                       return (
                         <div
@@ -1498,6 +2143,12 @@ export default function Page() {
                                 </span>
                                 <span>•</span>
                                 <span className="font-mono">{fmtHmFromMs(durationMs)}</span>
+                                {pausedMs > 0 ? (
+                                  <>
+                                    <span>•</span>
+                                    <span className="font-mono text-slate-500">Duraklatma: {fmtHmFromMs(pausedMs)}</span>
+                                  </>
+                                ) : null}
                               </div>
                             </div>
                           </div>
@@ -1519,7 +2170,7 @@ export default function Page() {
                                 <DropdownMenuItem onClick={() => openEditDialog(session)}>
                                   <Pencil className="mr-2 h-4 w-4" /> Düzenle
                                 </DropdownMenuItem>
-                                <DropdownMenuItem className="text-red-600" onClick={() => deleteSession(session.id)}>
+                                <DropdownMenuItem className="text-red-600" onClick={() => openDeleteSession(session.id)}>
                                   <Trash2 className="mr-2 h-4 w-4" /> Sil
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
@@ -1686,20 +2337,12 @@ export default function Page() {
                     <CardContent>
                       <div className="h-[330px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart
-                            data={chartData.daily}
-                            margin={{ top: 10, right: 10, left: -10, bottom: 0 }}
-                            barCategoryGap={18}
-                            barGap={2}
-                          >
+                          <BarChart data={chartData.daily} margin={{ top: 10, right: 10, left: -10, bottom: 0 }} barCategoryGap={18} barGap={2}>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} />
                             <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12 }} dy={10} />
                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
                             <Tooltip
-                              formatter={(v: any, name: any) => [
-                                fmtHmFromHours(Number(v) || 0),
-                                categoryMap.get(name)?.name ?? name,
-                              ]}
+                              formatter={(v: any, name: any) => [fmtHmFromHours(Number(v) || 0), categoryMap.get(name)?.name ?? name]}
                               labelFormatter={(_: any, payload: any) => payload?.[0]?.payload?.fullDate ?? ""}
                             />
                             <Legend verticalAlign="bottom" content={renderLegend} />
@@ -1712,14 +2355,8 @@ export default function Page() {
                     </CardContent>
                   </Card>
 
-                  <Card
-                    className="flex flex-col justify-center items-center text-center p-6 shadow-none border"
-                    style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}
-                  >
-                    <div
-                      className="h-12 w-12 rounded-full flex items-center justify-center mb-3"
-                      style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}
-                    >
+                  <Card className="flex flex-col justify-center items-center text-center p-6 shadow-none border" style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}>
+                    <div className="h-12 w-12 rounded-full flex items-center justify-center mb-3" style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}>
                       <CalendarIcon className="h-6 w-6" />
                     </div>
                     <div className="text-2xl font-bold" style={{ color: theme.hex }}>
@@ -1728,9 +2365,7 @@ export default function Page() {
                     <div className="text-sm font-medium" style={{ color: theme.hex }}>
                       Toplam (7 Gün)
                     </div>
-                    <div className="text-xs text-muted-foreground mt-2">
-                      Günlük Ort: {fmtHmFromHours(chartData.dailyTotalHours / 7)}
-                    </div>
+                    <div className="text-xs text-muted-foreground mt-2">Günlük Ort: {fmtHmFromHours(chartData.dailyTotalHours / 7)}</div>
                   </Card>
                 </div>
               </TabsContent>
@@ -1745,21 +2380,11 @@ export default function Page() {
                     <CardContent>
                       <div className="h-[330px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart
-                            data={chartData.weekly}
-                            margin={{ top: 10, right: 10, left: -10, bottom: 0 }}
-                            barCategoryGap={18}
-                            barGap={2}
-                          >
+                          <BarChart data={chartData.weekly} margin={{ top: 10, right: 10, left: -10, bottom: 0 }} barCategoryGap={18} barGap={2}>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} />
                             <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12 }} dy={10} />
                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
-                            <Tooltip
-                              formatter={(v: any, name: any) => [
-                                fmtHmFromHours(Number(v) || 0),
-                                categoryMap.get(name)?.name ?? name,
-                              ]}
-                            />
+                            <Tooltip formatter={(v: any, name: any) => [fmtHmFromHours(Number(v) || 0), categoryMap.get(name)?.name ?? name]} />
                             <Legend verticalAlign="bottom" content={renderLegend} />
                             {stackKeys.map((id) => (
                               <Bar key={id} dataKey={id} stackId="a" fill={getCatHex(id)} barSize={40} radius={0} />
@@ -1770,14 +2395,8 @@ export default function Page() {
                     </CardContent>
                   </Card>
 
-                  <Card
-                    className="flex flex-col justify-center items-center text-center p-6 shadow-none border"
-                    style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}
-                  >
-                    <div
-                      className="h-12 w-12 rounded-full flex items-center justify-center mb-3"
-                      style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}
-                    >
+                  <Card className="flex flex-col justify-center items-center text-center p-6 shadow-none border" style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}>
+                    <div className="h-12 w-12 rounded-full flex items-center justify-center mb-3" style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}>
                       <BarChart3 className="h-6 w-6" />
                     </div>
                     <div className="text-2xl font-bold" style={{ color: theme.hex }}>
@@ -1786,9 +2405,7 @@ export default function Page() {
                     <div className="text-sm font-medium" style={{ color: theme.hex }}>
                       Toplam (4 Hafta)
                     </div>
-                    <div className="text-xs text-muted-foreground mt-2">
-                      Haftalık Ort: {fmtHmFromHours(chartData.weeklyTotalHours / 4)}
-                    </div>
+                    <div className="text-xs text-muted-foreground mt-2">Haftalık Ort: {fmtHmFromHours(chartData.weeklyTotalHours / 4)}</div>
                   </Card>
                 </div>
               </TabsContent>
@@ -1821,14 +2438,8 @@ export default function Page() {
                     </CardContent>
                   </Card>
 
-                  <Card
-                    className="flex flex-col justify-center items-center text-center p-6 shadow-none border"
-                    style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}
-                  >
-                    <div
-                      className="h-12 w-12 rounded-full flex items-center justify-center mb-3"
-                      style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}
-                    >
+                  <Card className="flex flex-col justify-center items-center text-center p-6 shadow-none border" style={{ backgroundColor: `${theme.hex}15`, borderColor: `${theme.hex}30` }}>
+                    <div className="h-12 w-12 rounded-full flex items-center justify-center mb-3" style={{ backgroundColor: `${theme.hex}25`, color: theme.hex }}>
                       <PieChartIcon className="h-6 w-6" />
                     </div>
                     <div className="text-2xl font-bold" style={{ color: theme.hex }}>
@@ -1846,65 +2457,55 @@ export default function Page() {
           {/* Settings */}
           <TabsContent value="settings" className="mt-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              
               {/* Category Management */}
               <Card className="shadow-sm md:col-span-2">
                 <CardHeader>
-                    <CardTitle className="text-base">Kategoriler</CardTitle>
+                  <CardTitle className="text-base">Kategoriler</CardTitle>
                 </CardHeader>
                 <CardContent>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-6">
-                        {categories.map(c => (
-                            <div key={c.id} className="flex items-center gap-2 p-3 border rounded-lg bg-white">
-                                <Input 
-                                    type="color" 
-                                    className="w-8 h-8 p-0 border-0 rounded-full cursor-pointer shrink-0"
-                                    value={c.color}
-                                    onChange={(e) => updateCategory(c.id, 'color', e.target.value)}
-                                />
-                                <Input 
-                                    value={c.name}
-                                    onChange={(e) => updateCategory(c.id, 'name', e.target.value)}
-                                    className="h-8 text-sm"
-                                />
-                                <Button 
-                                    variant="ghost" 
-                                    size="icon" 
-                                    className="h-8 w-8 text-slate-400 hover:text-red-500"
-                                    onClick={() => deleteCategory(c.id)}
-                                >
-                                    <X className="h-4 w-4" />
-                                </Button>
-                            </div>
-                        ))}
-                    </div>
-
-                    <div className="flex items-end gap-4 p-4 bg-slate-50 rounded-xl border border-dashed">
-                        <div className="space-y-1 flex-1">
-                            <Label>Yeni Kategori Adı</Label>
-                            <Input 
-                                placeholder="Örn: Yazılım" 
-                                value={newCatName} 
-                                onChange={(e) => setNewCatName(e.target.value)}
-                            />
-                        </div>
-                        <div className="space-y-1">
-                             <Label>Renk</Label>
-                             <div className="flex items-center gap-2">
-                                <div className="relative">
-                                    <Input 
-                                        type="color" 
-                                        value={newCatColor} 
-                                        onChange={(e) => setNewCatColor(e.target.value)}
-                                        className="w-10 h-10 p-1 rounded-lg cursor-pointer"
-                                    />
-                                </div>
-                             </div>
-                        </div>
-                        <Button onClick={addCategory} disabled={!newCatName.trim()}>
-                            <Plus className="mr-2 h-4 w-4" /> Ekle
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-6">
+                    {categories.map((c) => (
+                      <div key={c.id} className="flex items-center gap-2 p-3 border rounded-lg bg-white">
+                        <Input
+                          type="color"
+                          className="w-8 h-8 p-0 border-0 rounded-full cursor-pointer shrink-0"
+                          value={c.color}
+                          onChange={(e) => updateCategory(c.id, "color", e.target.value)}
+                        />
+                        <Input value={c.name} onChange={(e) => updateCategory(c.id, "name", e.target.value)} className="h-8 text-sm" />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-slate-400 hover:text-red-500"
+                          onClick={() => openDeleteCategory(c.id)}
+                          title="Sil"
+                        >
+                          <X className="h-4 w-4" />
                         </Button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex items-end gap-4 p-4 bg-slate-50 rounded-xl border border-dashed">
+                    <div className="space-y-1 flex-1">
+                      <Label>Yeni Kategori Adı</Label>
+                      <Input placeholder="Örn: Yazılım" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} />
                     </div>
+                    <div className="space-y-1">
+                      <Label>Renk</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="color"
+                          value={newCatColor}
+                          onChange={(e) => setNewCatColor(e.target.value)}
+                          className="w-10 h-10 p-1 rounded-lg cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                    <Button onClick={addCategory} disabled={!newCatName.trim()}>
+                      <Plus className="mr-2 h-4 w-4" /> Ekle
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
 
@@ -1927,9 +2528,65 @@ export default function Page() {
                       }}
                       className="max-w-[200px]"
                     />
-                    <div className="text-xs text-muted-foreground">
-                      Gösterimler “X saat Y dk” formatında. (Hedef dahil)
+                    <div className="text-xs text-muted-foreground">Gösterimler “X saat Y dk” formatında. (Hedef dahil)</div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Pomodoro Settings */}
+              <Card className="shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">Pomodoro</CardTitle>
+                  <CardDescription>Zaman takibi + 25/5 döngüsü (mola sırasında otomatik duraklatır).</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">Pomodoro modu</div>
+                    <Button
+                      variant={pomodoro.enabled ? "default" : "outline"}
+                      onClick={() => {
+                        setPomodoro((p) => ({ ...p, enabled: !p.enabled }));
+                        setLocalUpdatedAt(Date.now());
+                        toast("info", !pomodoro.enabled ? "Pomodoro açıldı." : "Pomodoro kapatıldı.");
+                      }}
+                    >
+                      {pomodoro.enabled ? "Açık" : "Kapalı"}
+                    </Button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label>Çalışma (dk)</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={240}
+                        value={pomodoro.workMin}
+                        onChange={(e) => {
+                          const v = clamp(Number(e.target.value) || 25, 1, 240);
+                          setPomodoro((p) => ({ ...p, workMin: v }));
+                          setLocalUpdatedAt(Date.now());
+                        }}
+                      />
                     </div>
+                    <div className="space-y-1">
+                      <Label>Mola (dk)</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={120}
+                        value={pomodoro.breakMin}
+                        onChange={(e) => {
+                          const v = clamp(Number(e.target.value) || 5, 1, 120);
+                          setPomodoro((p) => ({ ...p, breakMin: v }));
+                          setLocalUpdatedAt(Date.now());
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-muted-foreground">
+                    Not: Pomodoro açıkken başlatılan timer “çalışma” ile başlar. “mola” fazında süre saymaz (pause).
                   </div>
                 </CardContent>
               </Card>
@@ -1957,7 +2614,9 @@ export default function Page() {
                       <DialogContent>
                         <DialogHeader>
                           <DialogTitle>Tüm kayıtlar silinsin mi?</DialogTitle>
-                          <DialogDescription>Bu işlem geri alınamaz. Tüm çalışma kayıtları kalıcı olarak silinir.</DialogDescription>
+                          <ShadcnDialogDescription>
+                            Bu işlem geri alınamaz. Tüm çalışma kayıtları kalıcı olarak silinir.
+                          </ShadcnDialogDescription>
                         </DialogHeader>
 
                         <DialogFooter>
@@ -1970,6 +2629,7 @@ export default function Page() {
                               setSessions([]);
                               setLocalUpdatedAt(Date.now());
                               setResetOpen(false);
+                              toast("success", "Tüm kayıtlar silindi.");
                             }}
                           >
                             Evet, sil
@@ -1996,11 +2656,7 @@ export default function Page() {
         {!running && (
           <Dialog open={mobileStartOpen} onOpenChange={setMobileStartOpen}>
             <DialogTrigger asChild>
-              <Button
-                size="icon"
-                className="h-14 w-14 rounded-full shadow-xl border-0 text-white"
-                style={{ backgroundColor: theme.hex }}
-              >
+              <Button size="icon" className="h-14 w-14 rounded-full shadow-xl border-0 text-white" style={{ backgroundColor: theme.hex }}>
                 <Play className="h-6 w-6 text-white" />
               </Button>
             </DialogTrigger>
@@ -2008,7 +2664,7 @@ export default function Page() {
             <DialogContent className="fixed bottom-0 left-0 right-0 translate-y-0 top-auto rounded-t-2xl p-4">
               <DialogHeader>
                 <DialogTitle>Hızlı Başlat</DialogTitle>
-                <DialogDescription>Kategori seç, istersen etiket ekle ve başlat.</DialogDescription>
+                <ShadcnDialogDescription>Kategori seç, istersen etiket ekle ve başlat.</ShadcnDialogDescription>
               </DialogHeader>
 
               <div className="grid gap-4 mt-2">
@@ -2048,12 +2704,7 @@ export default function Page() {
                   </datalist>
                 </div>
 
-                <Button
-                  size="lg"
-                  className="h-12 rounded-xl shadow-lg border-0 text-white"
-                  style={{ backgroundColor: theme.hex }}
-                  onClick={startSession}
-                >
+                <Button size="lg" className="h-12 rounded-xl shadow-lg border-0 text-white" style={{ backgroundColor: theme.hex }} onClick={startSession}>
                   <Play className="mr-2 h-5 w-5 fill-current" /> Başlat
                 </Button>
               </div>
