@@ -45,6 +45,7 @@ import {
   Pencil,
   X,
   Palette,
+  BookOpen,
 } from "lucide-react";
 
 import {
@@ -180,6 +181,33 @@ const toInputDateTime = (ms: number) => {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
+/** Helper: Bir kategori için akıllı placeholder metni */
+const getCategoryPlaceholder = (catId: string, catName?: string) => {
+  const lowerName = (catName || "").toLowerCase();
+  const lowerId = catId.toLowerCase();
+  
+  if (lowerId === "phd" || lowerId.includes("tez") || lowerName.includes("tez") || lowerName.includes("doktora")) {
+    return "Hangi kitap, makale veya bölüm?";
+  }
+  if (lowerId === "reading" || lowerName.includes("okuma")) {
+    return "Kitap veya makale adı...";
+  }
+  if (lowerId === "work" || lowerName.includes("iş")) {
+    return "Proje veya görev adı...";
+  }
+  return "Ne üzerinde çalışıyorsun?";
+};
+
+/** Helper: Geçmiş oturumlardan o kategoride kullanılmış benzersiz etiketleri getirir */
+const getUniqueLabelsForCategory = (sessions: Session[], categoryId: string) => {
+  const labels = sessions
+    .filter((s) => s.categoryId === categoryId && s.label && s.label.trim().length > 0)
+    .map((s) => s.label.trim());
+  
+  // Set ile benzersiz yap, alfabetik sırala
+  return Array.from(new Set(labels)).sort((a, b) => a.localeCompare(b, "tr-TR"));
+};
+
 function usePersistentState<T>(
   key: string,
   initialValue: T
@@ -298,12 +326,14 @@ const SessionDialog = ({
   onOpenChange,
   initialData,
   categories,
+  sessions,
   onSave,
 }: {
   isOpen: boolean;
   onOpenChange: (o: boolean) => void;
   initialData?: Session | null;
   categories: Category[];
+  sessions: Session[];
   onSave: (s: Partial<Session>) => void;
 }) => {
   const [formData, setFormData] = useState({
@@ -335,6 +365,15 @@ const SessionDialog = ({
       }
     }
   }, [isOpen, initialData, categories]);
+
+  // Seçili kategori için geçmiş etiketleri bul
+  const suggestedLabels = useMemo(() => {
+    if (!formData.categoryId) return [];
+    return getUniqueLabelsForCategory(sessions, formData.categoryId);
+  }, [sessions, formData.categoryId]);
+
+  const selectedCategory = categories.find(c => c.id === formData.categoryId);
+  const placeholder = getCategoryPlaceholder(formData.categoryId, selectedCategory?.name);
 
   const handleSave = () => {
     const start = new Date(formData.startStr).getTime();
@@ -389,12 +428,20 @@ const SessionDialog = ({
           </div>
           <div className="grid grid-cols-4 items-center gap-4">
             <Label className="text-right">Etiket</Label>
-            <Input
-              value={formData.label}
-              onChange={(e) => setFormData({ ...formData, label: e.target.value })}
-              className="col-span-3"
-              placeholder="Opsiyonel"
-            />
+            <div className="col-span-3">
+                <Input
+                value={formData.label}
+                onChange={(e) => setFormData({ ...formData, label: e.target.value })}
+                placeholder={placeholder}
+                list="dialog-labels"
+                autoComplete="off"
+                />
+                <datalist id="dialog-labels">
+                    {suggestedLabels.map((label) => (
+                        <option key={label} value={label} />
+                    ))}
+                </datalist>
+            </div>
           </div>
           <div className="grid grid-cols-4 items-center gap-4">
             <Label className="text-right">Başlangıç</Label>
@@ -534,6 +581,17 @@ export default function Page() {
     const name = cat?.name ?? "Çalışma";
     return { activeCat, hex, name };
   }, [running?.categoryId, quickCat, categories, categoryMap, getCatHex]);
+
+  // Suggested labels for Quick Start based on selected category
+  const quickStartSuggestions = useMemo(() => {
+    if (!quickCat) return [];
+    return getUniqueLabelsForCategory(sessions, quickCat);
+  }, [sessions, quickCat]);
+
+  const quickStartPlaceholder = useMemo(() => {
+    const cat = categoryMap.get(quickCat);
+    return getCategoryPlaceholder(quickCat, cat?.name);
+  }, [quickCat, categoryMap]);
 
   // Custom Legend
   const renderLegend = useCallback(() => {
@@ -1058,6 +1116,7 @@ export default function Page() {
           onOpenChange={setSessionDialogOpen}
           initialData={editingSession}
           categories={categories}
+          sessions={sessions}
           onSave={handleSessionSave}
         />
 
@@ -1215,10 +1274,17 @@ export default function Page() {
                     <Label className="text-xs font-semibold uppercase text-muted-foreground">Etiket</Label>
                     <Input
                       className="h-12 bg-white dark:bg-slate-950 border-slate-200"
-                      placeholder="Örn: Tez Yazımı"
+                      placeholder={quickStartPlaceholder}
                       value={quickLabel}
                       onChange={(e) => setQuickLabel(e.target.value)}
+                      list="quick-labels"
+                      autoComplete="off"
                     />
+                    <datalist id="quick-labels">
+                      {quickStartSuggestions.map((label) => (
+                        <option key={label} value={label} />
+                      ))}
+                    </datalist>
                   </div>
                 </div>
 
@@ -1969,10 +2035,17 @@ export default function Page() {
                   <Label className="text-xs font-semibold uppercase text-muted-foreground">Etiket</Label>
                   <Input
                     className="h-12 bg-white dark:bg-slate-950 border-slate-200"
-                    placeholder="Örn: Tez Yazımı"
+                    placeholder={quickStartPlaceholder}
                     value={quickLabel}
                     onChange={(e) => setQuickLabel(e.target.value)}
+                    list="quick-labels"
+                    autoComplete="off"
                   />
+                  <datalist id="quick-labels">
+                    {quickStartSuggestions.map((label) => (
+                      <option key={label} value={label} />
+                    ))}
+                  </datalist>
                 </div>
 
                 <Button
