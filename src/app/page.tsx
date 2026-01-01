@@ -71,9 +71,31 @@ type Snapshot = { categories: Category[]; sessions: Session[]; dailyTarget: numb
 type CloudStatus = "disabled" | "signed_out" | "signed_in" | "syncing" | "error";
 type RangeFilter = "all" | "today" | "week";
 
-/** ========= Defaults ========= */
+/** ========= Defaults & Helpers ========= */
+
+// Eski versiyondaki tailwind class'larını hex'e çevirmek için harita
+const OLD_COLOR_MAP: Record<string, string> = {
+  "bg-indigo-500": "#6366f1",
+  "bg-blue-500": "#3b82f6",
+  "bg-emerald-500": "#10b981",
+  "bg-rose-500": "#f43f5e",
+  "bg-amber-500": "#f59e0b",
+  "bg-slate-500": "#64748b",
+  "bg-red-500": "#ef4444",
+  "bg-orange-500": "#f97316",
+  "bg-yellow-500": "#eab308",
+  "bg-green-500": "#22c55e",
+  "bg-teal-500": "#14b8a6",
+  "bg-cyan-500": "#06b6d4",
+  "bg-sky-500": "#0ea5e9",
+  "bg-violet-500": "#8b5cf6",
+  "bg-purple-500": "#a855f7",
+  "bg-fuchsia-500": "#d946ef",
+  "bg-pink-500": "#ec4899",
+};
+
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: "phd", name: "PhD / Tez", color: "#6366f1" }, // Tailwind renkleri yerine Hex tutmak daha kolay yönetilir
+  { id: "phd", name: "PhD / Tez", color: "#6366f1" },
   { id: "work", name: "İş", color: "#3b82f6" },
   { id: "reading", name: "Okuma", color: "#10b981" },
   { id: "sport", name: "Spor", color: "#f43f5e" },
@@ -81,7 +103,15 @@ const DEFAULT_CATEGORIES: Category[] = [
   { id: "other", name: "Diğer", color: "#64748b" },
 ];
 
-/** ========= Helpers ========= */
+/** Rastgele canlı renk üretici (bozuk renkler için fallback) */
+const getRandomBrightColor = () => {
+  const colors = [
+    "#ef4444", "#f97316", "#f59e0b", "#84cc16", "#10b981", 
+    "#06b6d4", "#3b82f6", "#6366f1", "#8b5cf6", "#d946ef", "#f43f5e"
+  ];
+  return colors[Math.floor(Math.random() * colors.length)];
+};
+
 const uid = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -450,6 +480,27 @@ export default function Page() {
   useEffect(() => {
     stateRef.current = { categories, sessions, dailyTarget, localUpdatedAt };
   }, [categories, sessions, dailyTarget, localUpdatedAt]);
+
+  // --- MIGRATION: Fix legacy Tailwind colors ---
+  useEffect(() => {
+    if (!catsHydrated) return;
+
+    const needsFix = categories.some((c) => !c.color || !c.color.startsWith("#"));
+    
+    if (needsFix) {
+      const fixedCategories = categories.map((c) => {
+        // Renk bozuksa veya hex değilse (örn. "bg-blue-500")
+        if (!c.color || !c.color.startsWith("#")) {
+          // Eski haritadan bak, yoksa rastgele canlı bir renk ata
+          const newColor = OLD_COLOR_MAP[c.color] || getRandomBrightColor();
+          return { ...c, color: newColor };
+        }
+        return c;
+      });
+      setCategories(fixedCategories);
+      setLocalUpdatedAt(Date.now());
+    }
+  }, [catsHydrated, categories, setCategories, setLocalUpdatedAt]);
 
   // Update `nowForCalculations` every minute for relative times/charts, instead of every second
   useEffect(() => {
