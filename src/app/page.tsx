@@ -1768,6 +1768,12 @@ function parseBulkBibtex(fileContent: string): ReadingItem[] {
 
 /** ========= Page ========= */
 export default function Page() {
+  // 1. BU SATIRLARI EKLE (Mevcut kodunun en başına)
+const [isMounted, setIsMounted] = useState(false);
+
+useEffect(() => {
+  setIsMounted(true);
+}, []);
   /** ========= Toast state ========= */
   const toastActionsRef = useRef<Map<string, () => void>>(new Map());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -3108,7 +3114,7 @@ export default function Page() {
 
   /** ========= UI: Skeleton Loading ========= */
   const allHydrated = catsHydrated && topicsHydrated && readingHydrated && sessionsHydrated;
-  if (!allHydrated) {
+  if (!isMounted ||!allHydrated) {
     return (
       <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 px-4 py-6">
         <div className="mx-auto max-w-5xl space-y-6">
