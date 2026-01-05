@@ -1,14 +1,14 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createClient, type User } from "@supabase/supabase-js";
-
+import { type User } from "@supabase/supabase-js";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -16,8 +16,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,7 +27,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
-
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Play,
   Square,
@@ -59,7 +59,6 @@ import {
   Link as LinkIcon,
   Database,
 } from "lucide-react";
-
 import {
   BarChart,
   Bar,
@@ -76,1716 +75,115 @@ import {
   Legend,
 } from "recharts";
 
-
-/** ========= Types ========= */
-type Category = { id: string; name: string; color: string };
-type Topic = { id: string; name: string; color?: string };
-
-type ReadingStatus = "to_read" | "reading" | "done";
-type ReadingType = "book" | "article" | "chapter" | "thesis" | "other";
-type ReadingItem = {
-  id: string;
-  title: string;
-  authors?: string;
-  year?: string;
-  type: ReadingType;
-  status: ReadingStatus;
-  tags: string[];
-  url?: string;
-  doi?: string;
-  notes?: string;
-  updatedAt: number;
-  zoteroKey?: string; // <-- BU SATIRI EKLE (Opsiyonel alan)
-};
-
-type Session = {
-  id: string;
-  categoryId: string;
-  topicId?: string;
-  sourceId?: string;
-  label: string;
-  start: number;
-  end: number;
-  pausedMs?: number;
-};
-
-type Running = {
-  categoryId: string;
-  topicId?: string;
-  sourceId?: string;
-  label: string;
-  wallStart: number;
-  lastStart: number;
-  elapsedActiveMs: number;
-  isPaused: boolean;
-  pausedAt?: number;
-};
-
-type Snapshot = {
-  categories: Category[];
-  topics: Topic[];
-  reading: ReadingItem[];
-  sessions: Session[];
-  dailyTarget: number;
-};
-
-type CloudStatus = "disabled" | "signed_out" | "signed_in" | "syncing" | "error";
-type RangeFilter = "all" | "today" | "week";
-type ReadingStatusFilter = "all" | ReadingStatus;
-
-/** ========= Defaults & Helpers ========= */
-
-const OLD_COLOR_MAP: Record<string, string> = {
-  "bg-indigo-500": "#6366f1",
-  "bg-blue-500": "#3b82f6",
-  "bg-emerald-500": "#10b981",
-  "bg-rose-500": "#f43f5e",
-  "bg-amber-500": "#f59e0b",
-  "bg-slate-500": "#64748b",
-  "bg-red-500": "#ef4444",
-  "bg-orange-500": "#f97316",
-  "bg-yellow-500": "#eab308",
-  "bg-green-500": "#22c55e",
-  "bg-teal-500": "#14b8a6",
-  "bg-cyan-500": "#06b6d4",
-  "bg-sky-500": "#0ea5e9",
-  "bg-violet-500": "#8b5cf6",
-  "bg-purple-500": "#a855f7",
-  "bg-fuchsia-500": "#d946ef",
-  "bg-pink-500": "#ec4899",
-};
-
-const DEFAULT_CATEGORIES: Category[] = [
-  { id: "phd", name: "PhD / Tez", color: "#6366f1" },
-  { id: "work", name: "İş", color: "#3b82f6" },
-  { id: "reading", name: "Okuma", color: "#10b981" },
-  { id: "writing", name: "Yazma", color: "#f43f5e" },
-  { id: "admin", name: "İdari", color: "#f59e0b" },
-  { id: "other", name: "Diğer", color: "#64748b" },
-];
-
-const DEFAULT_TOPICS: Topic[] = [
-  { id: "lit", name: "Literatür Tarama", color: "#0ea5e9" },
-  { id: "methods", name: "Yöntem", color: "#8b5cf6" },
-  { id: "analysis", name: "Analiz", color: "#f97316" },
-];
-
-const getRandomBrightColor = () => {
-  const colors = [
-    "#ef4444",
-    "#f97316",
-    "#f59e0b",
-    "#84cc16",
-    "#10b981",
-    "#06b6d4",
-    "#3b82f6",
-    "#6366f1",
-    "#8b5cf6",
-    "#d946ef",
-    "#f43f5e",
-  ];
-  return colors[Math.floor(Math.random() * colors.length)];
-};
-
-const uid = () =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-const fmtTime = (ms: number) => {
-  const d = new Date(ms);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-};
-
-const fmtDuration = (ms: number) => {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  if (h > 0) return `${h}sa ${m % 60}dk`;
-  return `${m}dk ${s % 60}sn`;
-};
-
-const fmtCompact = (ms: number) => {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hh = Math.floor(totalSeconds / 3600);
-  const mm = Math.floor((totalSeconds % 3600) / 60);
-  const ss = totalSeconds % 60;
-  if (hh > 0) return `${hh}:${pad2(mm)}`;
-  return `${mm}:${pad2(ss)}`;
-};
-
-const fmtHmFromMs = (ms: number) => {
-  const totalMin = Math.max(0, Math.round(ms / 60000));
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  if (h <= 0) return `${m} dk`;
-  if (m === 0) return `${h} saat`;
-  return `${h} saat ${m} dk`;
-};
-
-const fmtHmFromHours = (hours: number) => fmtHmFromMs(Math.round(hours * 3600000));
-
-const startOfDayMs = (d: Date) => {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x.getTime();
-};
-
-const startOfWeekMs = (d: Date) => {
-  const x = new Date(d);
-  const day = x.getDay();
-  const diff = x.getDate() - day + (day === 0 ? -6 : 1);
-  x.setDate(diff);
-  x.setHours(0, 0, 0, 0);
-  return x.getTime();
-};
-
-const sessionDurationMs = (s: Session) => Math.max(0, (s.end - s.start) - (s.pausedMs ?? 0));
-const wallDurationMs = (s: Session) => Math.max(0, s.end - s.start);
-
-const overlapActiveMs = (s: Session, rangeStart: number, rangeEnd: number) => {
-  const w = wallDurationMs(s);
-  if (w <= 0) return 0;
-  const o = Math.max(0, Math.min(s.end, rangeEnd) - Math.max(s.start, rangeStart));
-  if (o <= 0) return 0;
-  const active = sessionDurationMs(s);
-  return Math.max(0, Math.round(active * (o / w)));
-};
-
-const getCategoryPlaceholder = (catId: string, catName?: string) => {
-  const lowerName = (catName || "").toLowerCase();
-  const lowerId = catId.toLowerCase();
-  if (lowerId === "phd" || lowerId.includes("tez") || lowerName.includes("tez") || lowerName.includes("doktora")) {
-    return "Bölüm, argüman, not...";
-  }
-  if (lowerId === "reading" || lowerName.includes("okuma")) return "Okuduğun bölüm/konu...";
-  if (lowerId === "writing" || lowerName.includes("yaz")) return "Yazdığın kısım...";
-  if (lowerId === "work" || lowerName.includes("iş")) return "Görev / proje...";
-  return "Ne üzerinde çalışıyorsun?";
-};
-
-const getUniqueLabelsForCategory = (sessions: Session[], categoryId: string) => {
-  const labels = sessions
-    .filter((s) => s.categoryId === categoryId && s.label && s.label.trim().length > 0)
-    .map((s) => s.label.trim());
-  return Array.from(new Set(labels)).sort((a, b) => a.localeCompare(b, "tr-TR"));
-};
-
-const parseTags = (raw: string) =>
-  raw
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-/** ========= Persistent State Hook ========= */
-function usePersistentState<T>(key: string, initialValue: T): [T, React.Dispatch<React.SetStateAction<T>>, boolean] {
-  const [state, setState] = useState<T>(initialValue);
-  const [hydrated, setHydrated] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const stored = window.localStorage.getItem(key);
-      if (stored) setState(JSON.parse(stored));
-    } catch {
-      // ignore
-    } finally {
-      setHydrated(true);
-    }
-  }, [key]);
-
-  useEffect(() => {
-    if (!hydrated || typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(key, JSON.stringify(state));
-    } catch {
-      // ignore
-    }
-  }, [key, state, hydrated]);
-
-  return [state, setState, hydrated];
-}
-
-/** ========= Supabase (ENV only) ========= */
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
-
-/** ========= Storage keys ========= */
-const LS_CATEGORIES = "talip-v2.categories";
-const LS_TOPICS = "talip-v2.topics";
-const LS_READING = "talip-v2.reading";
-const LS_SESSIONS = "talip-v2.sessions";
-const LS_TARGET = "talip-v2.target";
-const LS_UPDATED_AT = "talip-v2.updatedAt";
-const LS_RUNNING = "talip-v2.running";
-
-/** ========= Tiny Toast System ========= */
-type ToastType = "success" | "error" | "info";
-type ToastItem = { id: string; type: ToastType; title?: string; message: string; actionLabel?: string; actionId?: string };
-
-function ToastViewport({
-  toasts,
-  remove,
-  onAction,
-}: {
-  toasts: ToastItem[];
-  remove: (id: string) => void;
-  onAction: (actionId: string) => void;
-}) {
-  return (
-    <div className="fixed top-4 right-4 z-[9999] w-[360px] max-w-[calc(100vw-2rem)] space-y-2">
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          className="rounded-2xl border bg-white dark:bg-slate-950 shadow-lg p-3 flex gap-3 items-start"
-          role="status"
-          aria-live="polite"
-        >
-          <div className="mt-0.5">
-            {t.type === "success" ? (
-              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-            ) : t.type === "error" ? (
-              <AlertTriangle className="h-5 w-5 text-rose-600" />
-            ) : (
-              <Info className="h-5 w-5 text-slate-600" />
-            )}
-          </div>
-
-          <div className="min-w-0 flex-1">
-            {t.title ? <div className="font-semibold text-sm">{t.title}</div> : null}
-            <div className="text-sm text-slate-600 dark:text-slate-300">{t.message}</div>
-
-            {t.actionLabel && t.actionId ? (
-              <div className="mt-2">
-                <button
-                  className="text-sm font-semibold text-slate-900 dark:text-slate-100 hover:underline"
-                  onClick={() => onAction(t.actionId!)}
-                  type="button"
-                >
-                  {t.actionLabel}
-                </button>
-              </div>
-            ) : null}
-          </div>
-
-          <button
-            onClick={() => remove(t.id)}
-            className="rounded-lg p-1 hover:bg-slate-100 dark:hover:bg-slate-900 text-slate-500"
-            aria-label="Kapat"
-            type="button"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/** ========= Skeleton ========= */
-const Skeleton = ({ className = "" }: { className?: string }) => (
-  <div className={`animate-pulse rounded-xl bg-slate-200/70 dark:bg-slate-800/60 ${className}`} />
-);
-
-/** ========= ConfirmDialog ========= */
-function ConfirmDialog({
-  open,
-  onOpenChange,
-  title,
-  description,
-  confirmText = "Evet",
-  cancelText = "Vazgeç",
-  destructive,
-  onConfirm,
-}: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  title: string;
-  description?: string;
-  confirmText?: string;
-  cancelText?: string;
-  destructive?: boolean;
-  onConfirm: () => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          {description ? <ShadcnDialogDescription>{description}</ShadcnDialogDescription> : null}
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} type="button">
-            {cancelText}
-          </Button>
-          <Button
-            variant={destructive ? "destructive" : "default"}
-            onClick={() => {
-              onConfirm();
-              onOpenChange(false);
-            }}
-            type="button"
-          >
-            {confirmText}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** ========= Mini DateTime Picker ========= */
-function roundToNearest5Min(ms: number) {
-  const d = new Date(ms);
-  const m = d.getMinutes();
-  const rounded = Math.round(m / 5) * 5;
-
-  if (rounded === m && d.getSeconds() === 0 && d.getMilliseconds() === 0) return ms;
-
-  if (rounded >= 60) {
-    d.setHours(d.getHours() + 1);
-    d.setMinutes(0, 0, 0);
-    return d.getTime();
-  }
-
-  d.setMinutes(rounded, 0, 0);
-  return d.getTime();
-}
-
-
-function MiniDateTimePicker({
-  valueMs,
-  onChange,
-  label,
-}: {
-  valueMs: number;
-  onChange: (ms: number) => void;
-  label: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-
-  const d = useMemo(() => new Date(valueMs), [valueMs]);
-  
-  // Takvim görünümü için state
-  const [viewYear, setViewYear] = useState(d.getFullYear());
-  const [viewMonth, setViewMonth] = useState(d.getMonth());
-
-  // Popup her açıldığında takvim görünümünü seçili tarihe eşitle
-  useEffect(() => {
-    if (open) {
-      setViewYear(d.getFullYear());
-      setViewMonth(d.getMonth());
-    }
-  }, [open, d]);
-
-  // Click-Outside Mantığı (Düzeltildi)
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (!open) return;
-      if (!wrapRef.current) return;
-
-      const target = e.target as HTMLElement;
-
-      // 1. Tıklama bizim bileşenin içindeyse kapatma
-      if (wrapRef.current.contains(target)) return;
-
-      // 2. KRİTİK DÜZELTME: Tıklama Shadcn/Radix Select portalının (açılan menü) içindeyse kapatma.
-      // Radix UI genelde [data-radix-popper-content-wrapper] veya role="listbox" kullanır.
-      if (target.closest('[role="listbox"]') || target.closest('[data-radix-popper-content-wrapper]')) {
-        return;
-      }
-
-      setOpen(false);
-    };
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-
-    if (open) {
-      document.addEventListener("mousedown", onDown);
-      document.addEventListener("keydown", onKey);
-    }
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const daysInMonth = useMemo(() => new Date(viewYear, viewMonth + 1, 0).getDate(), [viewYear, viewMonth]);
-  const firstDay = useMemo(() => new Date(viewYear, viewMonth, 1).getDay(), [viewYear, viewMonth]);
-  const mondayIndex = useMemo(() => (firstDay === 0 ? 6 : firstDay - 1), [firstDay]);
-
-  const selectedY = d.getFullYear();
-  const selectedM = d.getMonth();
-  const selectedDay = d.getDate();
-  const hours = d.getHours();
-  const minutes = d.getMinutes();
-
-  // Dakikayı en yakın 5'liğe görsel olarak eşlemek için (Select value eşleşmesi)
-  const displayMinutes = String(Math.round(minutes / 5) * 5 % 60);
-
-  const monthName = useMemo(
-    () => new Date(viewYear, viewMonth, 1).toLocaleDateString("tr-TR", { month: "long", year: "numeric" }),
-    [viewYear, viewMonth]
-  );
-
-  const setDatePreserveTime = (yy: number, mm: number, dd: number) => {
-    const next = new Date(valueMs);
-    next.setFullYear(yy, mm, dd);
-    onChange(next.getTime());
-  };
-
-  const setTimePreserveDate = (hh: number, min: number) => {
-    const next = new Date(valueMs);
-    next.setHours(hh, min);
-    // Saniye ve milisaniyeyi sıfırlayalım ki temiz görünsün
-    next.setSeconds(0, 0); 
-    onChange(next.getTime());
-  };
-
-  const display = useMemo(() => {
-    const dt = new Date(valueMs);
-    const dateStr = dt.toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" });
-    return `${dateStr} • ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
-  }, [valueMs]);
-
-  const hoursOptions = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
-  const minuteOptions = useMemo(() => Array.from({ length: 12 }, (_, i) => i * 5), []);
-
-  return (
-    <div className="col-span-3" ref={wrapRef}>
-      <div className="space-y-1">
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full justify-between rounded-xl h-10 px-3 font-normal"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-        >
-          <span className="truncate">{display}</span>
-          <CalendarIcon className="h-4 w-4 text-muted-foreground opacity-50" />
-        </Button>
-        <div className="text-[11px] text-muted-foreground px-1">{label}</div>
-      </div>
-
-      {open && (
-        <div className="relative z-[100]">
-          <div className="absolute top-2 left-0 z-[100] w-[320px] max-w-[calc(100vw-2rem)] rounded-2xl border bg-white dark:bg-slate-950 shadow-2xl p-3 animate-in fade-in zoom-in-95 duration-100">
-            {/* Takvim Header */}
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 rounded-lg"
-                onClick={() => {
-                  const m = viewMonth - 1;
-                  if (m < 0) {
-                    setViewMonth(11);
-                    setViewYear((y) => y - 1);
-                  } else setViewMonth(m);
-                }}
-              >
-                ‹
-              </Button>
-
-              <div className="text-sm font-semibold">{monthName}</div>
-
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 rounded-lg"
-                onClick={() => {
-                  const m = viewMonth + 1;
-                  if (m > 11) {
-                    setViewMonth(0);
-                    setViewYear((y) => y + 1);
-                  } else setViewMonth(m);
-                }}
-              >
-                ›
-              </Button>
-            </div>
-
-            {/* Gün İsimleri */}
-            <div className="grid grid-cols-7 gap-1 mb-1 text-[10px] text-slate-500 font-medium text-center">
-              {["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"].map((x) => (
-                <div key={x}>{x}</div>
-              ))}
-            </div>
-
-            {/* Günler Grid */}
-            <div className="grid grid-cols-7 gap-1">
-              {Array.from({ length: mondayIndex }).map((_, i) => (
-                <div key={`empty-${i}`} className="h-8" />
-              ))}
-              {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
-                const isSelected = selectedY === viewYear && selectedM === viewMonth && selectedDay === day;
-                const isToday =
-                  new Date().getDate() === day &&
-                  new Date().getMonth() === viewMonth &&
-                  new Date().getFullYear() === viewYear;
-
-                return (
-                  <button
-                    key={day}
-                    type="button"
-                    onClick={() => setDatePreserveTime(viewYear, viewMonth, day)}
-                    className={`h-8 rounded-lg text-sm transition-colors ${
-                      isSelected
-                        ? "bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900"
-                        : isToday
-                        ? "bg-slate-100 text-slate-900 font-semibold dark:bg-slate-800 dark:text-slate-100"
-                        : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    {day}
-                  </button>
-                );
-              })}
-            </div>
-
-            <Separator className="my-3" />
-
-            {/* Saat Seçimi */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <span className="text-[10px] font-medium text-muted-foreground uppercase">Saat</span>
-                <Select value={String(hours)} onValueChange={(v) => setTimePreserveDate(Number(v), minutes)}>
-                  <SelectTrigger className="h-9 rounded-lg text-xs">
-                    <SelectValue placeholder="Saat" />
-                  </SelectTrigger>
-                  <SelectContent position="popper" className="max-h-[200px]">
-                    {hoursOptions.map((h) => (
-                      <SelectItem key={h} value={String(h)} className="text-xs">
-                        {pad2(h)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1">
-                <span className="text-[10px] font-medium text-muted-foreground uppercase">Dakika</span>
-                <Select
-                  value={displayMinutes === "0" && minutes !== 0 && minutes !== 60 ? undefined : displayMinutes} 
-                  onValueChange={(v) => setTimePreserveDate(hours, Number(v))}
-                >
-                  <SelectTrigger className="h-9 rounded-lg text-xs">
-                    <SelectValue placeholder={pad2(minutes)} /> 
-                  </SelectTrigger>
-                  <SelectContent position="popper" className="max-h-[200px]">
-                    {minuteOptions.map((m) => (
-                      <SelectItem key={m} value={String(m)} className="text-xs">
-                        {pad2(m)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            <div className="mt-3 flex justify-end">
-              <Button size="sm" type="button" variant="secondary" className="h-8 text-xs" onClick={() => setOpen(false)}>
-                Tamam
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** ========= ActiveTimer ========= */
-const ActiveTimer = React.memo(
-  ({
-    running,
-    onStop,
-    onPause,
-    onResume,
-    categoryMap,
-    topicMap,
-    readingMap,
-    themeColor,
-  }: {
-    running: Running;
-    onStop: () => void;
-    onPause: () => void;
-    onResume: () => void;
-    categoryMap: Map<string, Category>;
-    topicMap: Map<string, Topic>;
-    readingMap: Map<string, ReadingItem>;
-    themeColor: string;
-  }) => {
-    const [now, setNow] = useState(Date.now());
-
-    useEffect(() => {
-      const t = setInterval(() => setNow(Date.now()), 1000);
-      return () => clearInterval(t);
-    }, []);
-
-    const liveActiveMs = useMemo(() => {
-      if (running.isPaused) return running.elapsedActiveMs;
-      return running.elapsedActiveMs + (now - running.lastStart);
-    }, [running, now]);
-
-    const catName = categoryMap.get(running.categoryId)?.name ?? running.categoryId;
-    const topicName = running.topicId ? topicMap.get(running.topicId)?.name ?? running.topicId : null;
-    const srcTitle = running.sourceId ? readingMap.get(running.sourceId)?.title ?? `Silinmiş: ${running.sourceId}` : null;
-
-    return (
-      <Card className="text-white border-none shadow-xl relative overflow-hidden">
-        <div
-          className="absolute inset-0"
-          style={{
-            background: `linear-gradient(135deg, ${themeColor} 0%, rgba(15, 23, 42, 1) 70%)`,
-          }}
-        />
-        <div className="absolute top-0 right-0 -mt-10 -mr-10 w-40 h-40 bg-white/10 rounded-full blur-3xl" />
-        <CardContent className="flex flex-col gap-6 py-8 relative z-10">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
-            <div className="flex items-center gap-4">
-              <div className="h-16 w-16 rounded-2xl flex items-center justify-center bg-white/10 backdrop-blur-sm border border-white/10 shadow-inner">
-                <Timer className="h-8 w-8" />
-              </div>
-              <div className="min-w-0">
-                <h3 className="text-sm font-medium text-white/80 flex flex-wrap items-center gap-2">
-                  <span className="font-semibold text-white">{catName}</span>
-
-                  {topicName ? (
-                    <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
-                      {topicName}
-                    </Badge>
-                  ) : null}
-
-                  {srcTitle ? (
-                    <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
-                      <BookOpen className="mr-1 h-3.5 w-3.5" />
-                      <span className="truncate max-w-[280px]">{srcTitle}</span>
-                    </Badge>
-                  ) : null}
-
-                  <Badge variant="secondary" className="bg-white/10 hover:bg-white/15 text-white border-0">
-                    {running.label ? running.label : "(etiketsiz)"}
-                  </Badge>
-
-                  <span className="text-xs text-white/60">• Başlangıç: {fmtTime(running.wallStart)}</span>
-                </h3>
-
-                <div className="text-5xl sm:text-6xl font-bold tabular-nums tracking-tight mt-1 font-mono">
-                  {fmtDuration(liveActiveMs)}
-                </div>
-
-                {running.isPaused ? <div className="mt-2 text-xs text-white/70">Duraklatıldı</div> : null}
-              </div>
-            </div>
-
-            <div className="flex gap-2 w-full sm:w-auto">
-              {!running.isPaused ? (
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="h-14 px-6 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
-                  onClick={onPause}
-                  type="button"
-                >
-                  <Pause className="mr-2 h-5 w-5" /> Duraklat
-                </Button>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="h-14 px-6 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
-                  onClick={onResume}
-                  type="button"
-                >
-                  <Play className="mr-2 h-5 w-5 fill-current" /> Devam
-                </Button>
-              )}
-
-              <Button
-                variant="destructive"
-                size="lg"
-                className="h-14 px-8 rounded-xl bg-white/10 hover:bg-white/15 text-white shadow-lg border border-white/10"
-                onClick={onStop}
-                type="button"
-              >
-                <Square className="mr-2 h-5 w-5 fill-current" /> Durdur & Kaydet
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
-);
-ActiveTimer.displayName = "ActiveTimer";
-
-/** ========= Activity Heatmap Component ========= */
-/** ========= Activity Heatmap Component (GitHub-like labels) ========= */
-/** ========= Activity Heatmap Component (GitHub-like labels) ========= */
-function ActivityHeatmap({ sessions, themeColor }: { sessions: Session[]; themeColor: string }) {
-  // --- Build a 52-week grid aligned to Monday (like GitHub) ---
-  const { days, weeks } = useMemo(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const start = new Date(today);
-    start.setDate(start.getDate() - 363);
-    start.setHours(0, 0, 0, 0);
-
-    const day = start.getDay();
-    const mondayOffset = day === 0 ? 6 : day - 1;
-    start.setDate(start.getDate() - mondayOffset);
-
-    const totalDays = 53 * 7;
-
-    const _days: Date[] = [];
-    const d = new Date(start);
-    for (let i = 0; i < totalDays; i++) {
-      _days.push(new Date(d));
-      d.setDate(d.getDate() + 1);
-    }
-
-    const _weeks: Date[][] = [];
-    for (let i = 0; i < _days.length; i += 7) _weeks.push(_days.slice(i, i + 7));
-
-    return { days: _days, weeks: _weeks };
-  }, []);
-
-  // --- Calculate totals per day (by day start) ---
-  const dailyTotals = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const day of days) {
-      const start = day.getTime();
-      const end = start + 86400000;
-      let total = 0;
-      for (const s of sessions) total += overlapActiveMs(s, start, end);
-      if (total > 0) map.set(start, total);
-    }
-    return map;
-  }, [sessions, days]);
-
-  // --- Determine levels (0-4) ---
-  const getLevel = (ms: number) => {
-    if (ms <= 0) return 0;
-    if (ms < 30 * 60 * 1000) return 1;
-    if (ms < 60 * 60 * 1000) return 2;
-    if (ms < 2 * 60 * 60 * 1000) return 3;
-    return 4;
-  };
-
-  const getCellStyle = (level: number) => {
-    if (level === 0) return {};
-    const opacities = [0.18, 0.35, 0.6, 1.0];
-    return { backgroundColor: themeColor, opacity: opacities[level - 1] };
-  };
-
-  // --- Month labels (top) ---
-  const monthLabels = useMemo(() => {
-    let prevMonth = -1;
-    return weeks.map((week) => {
-      const nextMonth =
-        prevMonth === -1 ? week[0].getMonth() : week.find((d) => d.getMonth() !== prevMonth)?.getMonth();
-
-      if (nextMonth === undefined || nextMonth === prevMonth) return "";
-      prevMonth = nextMonth;
-
-      const sampleDay = week.find((d) => d.getMonth() === nextMonth)!;
-      return sampleDay.toLocaleDateString("tr-TR", { month: "short" });
-    });
-  }, [weeks]);
-
-  const weekdayLabels = [
-    { row: 0, label: "Pzt" },
-    { row: 1, label: "Sal" },
-    { row: 2, label: "Çar" },
-    { row: 3, label: "Per" },
-    { row: 4, label: "Cum" },
-    { row: 5, label: "Cmt" },
-    { row: 6, label: "Paz" },
-  ];
-
-  /** ======= NEW: Pretty tooltip state ======= */
-  const [tip, setTip] = useState<null | {
-    x: number;
-    y: number;
-    dateStr: string;
-    durStr: string;
-    ms: number;
-    level: number;
-  }>(null);
-
-  const hideTip = useCallback(() => setTip(null), []);
-
-  useEffect(() => {
-    if (!tip) return;
-
-    const onScroll = () => setTip((t) => (t ? { ...t } : null)); // keep open but position updates via mouse move
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") hideTip();
-    };
-
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [tip, hideTip]);
-
-  const setTipFromEvent = useCallback(
-    (e: React.MouseEvent | React.FocusEvent, day: Date, total: number) => {
-      const level = getLevel(total);
-      const dateStr = day.toLocaleDateString("tr-TR", { day: "numeric", month: "short", year: "numeric" });
-      const durStr = fmtHmFromMs(total);
-
-      // Prefer mouse position; fallback to element rect center for focus
-      const isMouse = "clientX" in e;
-      const x = isMouse ? (e as React.MouseEvent).clientX : (e.target as HTMLElement).getBoundingClientRect().left + (e.target as HTMLElement).getBoundingClientRect().width / 2;
-      const y = isMouse ? (e as React.MouseEvent).clientY : (e.target as HTMLElement).getBoundingClientRect().top;
-
-      setTip({ x, y, dateStr, durStr, ms: total, level });
-    },
-    []
-  );
-
-  const moveTip = useCallback((e: React.MouseEvent) => {
-    setTip((t) => (t ? { ...t, x: e.clientX, y: e.clientY } : t));
-  }, []);
-
-  return (
-    <div className="w-full relative">
-      {/* NEW: Pretty tooltip */}
-      {tip ? (
-        <div
-          className="pointer-events-none fixed z-[200] select-none"
-          style={{
-            left: tip.x,
-            top: tip.y,
-            transform: "translate(-50%, calc(-100% - 10px))",
-          }}
-        >
-          <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-950/95 backdrop-blur shadow-2xl px-3 py-2 min-w-[190px]">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-slate-900 dark:text-slate-50">{tip.dateStr}</div>
-              <div className="text-[11px] text-muted-foreground">Seviye {tip.level}</div>
-            </div>
-
-            <div className="mt-1 flex items-center gap-2">
-              <span
-                className="h-2.5 w-2.5 rounded-sm"
-                style={{
-                  backgroundColor: tip.level === 0 ? "transparent" : themeColor,
-                  opacity: tip.level === 0 ? 1 : [0.18, 0.35, 0.6, 1.0][Math.max(0, tip.level - 1)],
-                  border: tip.level === 0 ? "1px solid rgba(148,163,184,.6)" : "none",
-                }}
-              />
-              <div className="text-sm text-slate-700 dark:text-slate-200">
-                Toplam: <span className="font-semibold">{tip.durStr}</span>
-              </div>
-            </div>
-
-            <div className="mt-1 text-[11px] text-muted-foreground">
-              (Esc ile kapat)
-            </div>
-          </div>
-
-          {/* arrow */}
-          <div
-            className="mx-auto h-2 w-2 rotate-45 border-b border-r border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-950/95"
-            style={{ marginTop: -1 }}
-          />
-        </div>
-      ) : null}
-
-      {/* Top month row */}
-      <div className="flex gap-2">
-        <div className="w-10 shrink-0" />
-        <div className="flex gap-1 overflow-x-auto w-full pb-2 scrollbar-hide">
-          {monthLabels.map((label, idx) => (
-            <div key={idx} className="w-[14px] text-[10px] text-muted-foreground leading-none">
-              {label}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Grid */}
-      <div className="flex gap-2">
-        {/* Weekday labels */}
-        <div className="w-10 shrink-0 pt-[2px]">
-          <div className="grid grid-rows-7 gap-[3px]">
-            {Array.from({ length: 7 }).map((_, r) => {
-              const hit = weekdayLabels.find((x) => x.row === r);
-              return (
-                <div key={r} className="h-[11px] flex items-center justify-end pr-1">
-                  {hit ? <span className="text-[10px] text-muted-foreground">{hit.label}</span> : null}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Weeks */}
-        <div className="flex gap-1 overflow-x-auto w-full pb-2 scrollbar-hide">
-          {weeks.map((week, wIdx) => (
-            <div key={wIdx} className="w-[14px] grid grid-rows-7 gap-[3px]">
-              {week.map((day, dIdx) => {
-                const ts = day.getTime();
-                const total = dailyTotals.get(ts) || 0;
-                const level = getLevel(total);
-
-                return (
-                  <button
-                    key={`${wIdx}-${dIdx}`}
-                    type="button"
-                    className={[
-                      "mx-auto flex-none w-[11px] h-[11px] rounded-sm transition-all",
-                      "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-400 dark:focus:ring-slate-600",
-                      "hover:ring-1 hover:ring-offset-1 hover:ring-slate-400",
-                      level === 0 ? "bg-transparent border border-slate-200/60 dark:border-slate-800/60" : "",
-                    ].join(" ")}
-                    style={getCellStyle(level)}
-                    onMouseEnter={(e) => setTipFromEvent(e, day, total)}
-                    onMouseMove={moveTip}
-                    onMouseLeave={hideTip}
-                    onFocus={(e) => setTipFromEvent(e, day, total)}
-                    onBlur={hideTip}
-                    aria-label={`${day.toLocaleDateString("tr-TR", {
-                      day: "numeric",
-                      month: "short",
-                      year: "numeric",
-                    })}: ${fmtHmFromMs(total)}`}
-                  />
-                );
-              })}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Legend */}
-      <div className="mt-3 flex items-center gap-2 text-[10px] text-muted-foreground">
-        <span>Az</span>
-        {[0, 1, 2, 3, 4].map((l) => (
-          <div
-            key={l}
-            className="w-[11px] h-[11px] rounded-sm border border-slate-200/60 dark:border-slate-800/60"
-            style={getCellStyle(l)}
-          />
-        ))}
-        <span>Çok</span>
-      </div>
-    </div>
-  );
-}
-
-/** ========= Session Dialog ========= */
-function SessionDialog({
-  isOpen,
-  onOpenChange,
-  initialData,
-  categories,
-  topics,
-  reading,
-  sessions,
-  onSave,
-  onQuickAddSource,
-  toast,
-}: {
-  isOpen: boolean;
-  onOpenChange: (o: boolean) => void;
-  initialData?: Session | null;
-  categories: Category[];
-  topics: Topic[];
-  reading: ReadingItem[];
-  sessions: Session[];
-  onSave: (s: Partial<Session>) => void;
-  onQuickAddSource: () => void;
-  toast: (type: ToastType, message: string, title?: string) => void;
-}) {
-  const [formData, setFormData] = useState({
-    categoryId: "",
-    topicId: "",
-    sourceId: "",
-    label: "",
-    startMs: Date.now(),
-    endMs: Date.now(),
-  });
-
-  useEffect(() => {
-    if (!isOpen) return;
-
-    if (initialData) {
-      setFormData({
-        categoryId: initialData.categoryId,
-        topicId: initialData.topicId ?? "none",
-        sourceId: initialData.sourceId ?? "none",
-        label: initialData.label,
-        startMs: initialData.start,
-        endMs: initialData.end,
-      });
-    } else {
-      // Temiz bir başlangıç saati (saniyesiz)
-      const now = new Date();
-      now.setSeconds(0, 0);
-      const nowMs = now.getTime();
-      
-      setFormData({
-        categoryId: categories[0]?.id || "",
-        topicId: "none",
-        sourceId: "none",
-        label: "",
-        startMs: nowMs - 3600000, // 1 saat önce
-        endMs: nowMs,
-      });
-    }
-  }, [isOpen, initialData, categories]);
-
-  const suggestedLabels = useMemo(() => {
-    if (!formData.categoryId) return [];
-    return getUniqueLabelsForCategory(sessions, formData.categoryId);
-  }, [sessions, formData.categoryId]);
-
-  const selectedCategory = categories.find((c) => c.id === formData.categoryId);
-  const placeholder = getCategoryPlaceholder(formData.categoryId, selectedCategory?.name);
-
-  // Hızlı Ayar Fonksiyonları (Saniye temizliği ile)
-  const shiftTime = (amountMinutes: number) => {
-    // Hem başlangıcı hem bitişi kaydırmak yerine genelde kullanıcı
-    // süreyi uzatmak/kısaltmak veya başlangıç zamanını düzeltmek ister.
-    // Burada basitçe seçili olan zamanları kaydıracağız.
-    setFormData(prev => {
-      const s = new Date(prev.startMs);
-      s.setMinutes(s.getMinutes() + amountMinutes);
-      s.setSeconds(0, 0);
-      
-      // Bitişi değiştirmek istemiyorsak sadece start'ı oynatabiliriz, 
-      // ama genelde "-15dk" demek "15dk daha erken başladım" demektir.
-      return { ...prev, startMs: s.getTime() };
-    });
-  };
-
-  const setEndToNow = () => {
-    const now = new Date();
-    now.setSeconds(0, 0);
-    setFormData(prev => ({ ...prev, endMs: now.getTime() }));
-  };
-
-  const handleSave = () => {
-    const start = formData.startMs;
-    const end = formData.endMs;
-
-    if (!Number.isFinite(start) || !Number.isFinite(end)) {
-      toast("error", "Lütfen geçerli bir tarih seçin.", "Hatalı tarih");
-      return;
-    }
-    if (end <= start) {
-      toast("error", "Bitiş zamanı başlangıçtan sonra olmalıdır.", "Hatalı zaman aralığı");
-      return;
-    }
-
-    onSave({
-      id: initialData?.id,
-      categoryId: formData.categoryId,
-      topicId: formData.topicId && formData.topicId !== "none" ? formData.topicId : undefined,
-      sourceId: formData.sourceId && formData.sourceId !== "none" ? formData.sourceId : undefined,
-      label: formData.label,
-      start,
-      end,
-    });
-
-    toast("success", initialData ? "Kayıt güncellendi." : "Kayıt eklendi.");
-    onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[800px] max-h-[90vh] overflow-hidden flex flex-col">
-        <DialogHeader>
-          <DialogTitle>{initialData ? "Kaydı Düzenle" : "Manuel Kayıt Ekle"}</DialogTitle>
-          <ShadcnDialogDescription>
-            {initialData ? "Mevcut çalışma kaydını güncelle." : "Geçmişe dönük bir çalışma kaydı oluştur."}
-          </ShadcnDialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-4 py-4 overflow-y-auto flex-1 pr-2">
-          {/* 1. TEMEL ALANLAR */}
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right">Kategori</Label>
-            <Select value={formData.categoryId} onValueChange={(v) => setFormData((p) => ({ ...p, categoryId: v }))}>
-              <SelectTrigger className="col-span-3">
-                <SelectValue placeholder="Kategori seç" />
-              </SelectTrigger>
-              <SelectContent>
-                {categories.map((c) => (
-                  <SelectItem key={c.id} value={c.id}>
-                    {c.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right">Konu</Label>
-            <Select value={formData.topicId} onValueChange={(v) => setFormData((p) => ({ ...p, topicId: v }))}>
-              <SelectTrigger className="col-span-3">
-                <SelectValue placeholder="(opsiyonel)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">(Seçme)</SelectItem>
-                {topics.map((t) => (
-                  <SelectItem key={t.id} value={t.id}>
-                    {t.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right">Kaynak</Label>
-            <div className="col-span-3 flex gap-2">
-              <Select value={formData.sourceId} onValueChange={(v) => setFormData((p) => ({ ...p, sourceId: v }))}>
-                <SelectTrigger className="flex-1">
-                  <SelectValue placeholder="(opsiyonel) Okunan kaynak" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">(Seçme)</SelectItem>
-                  {reading
-                    .slice()
-                    .sort((a, b) => b.updatedAt - a.updatedAt)
-                    .map((r) => (
-                      <SelectItem key={r.id} value={r.id}>
-                        {r.title}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-
-              <Button type="button" variant="outline" className="rounded-xl px-3" onClick={onQuickAddSource} title="Yeni kaynak ekle">
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right">Etiket</Label>
-            <div className="col-span-3">
-              <Input
-                value={formData.label}
-                onChange={(e) => setFormData((p) => ({ ...p, label: e.target.value }))}
-                placeholder={placeholder}
-                list="dialog-labels"
-                autoComplete="off"
-              />
-              <datalist id="dialog-labels">
-                {suggestedLabels.map((label) => (
-                  <option key={label} value={label} />
-                ))}
-              </datalist>
-            </div>
-          </div>
-
-          <Separator className="my-1" />
-
-          {/* 2. TARİH ALANLARI */}
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right pt-2 self-start">Başlangıç</Label>
-            <MiniDateTimePicker
-              valueMs={formData.startMs}
-              onChange={(ms) => setFormData((p) => ({ ...p, startMs: ms }))}
-              label="Başlangıç Tarihi ve Saati"
-            />
-          </div>
-
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label className="text-right pt-2 self-start">Bitiş</Label>
-            <MiniDateTimePicker
-              valueMs={formData.endMs}
-              onChange={(ms) => setFormData((p) => ({ ...p, endMs: ms }))}
-              label="Bitiş Tarihi ve Saati"
-            />
-          </div>
-
-          {/* 3. HIZLI AYARLAR */}
-          <div className="grid grid-cols-4 items-start gap-4 mt-2">
-            <Label className="text-right pt-2 text-xs text-muted-foreground">Hızlı Ayar</Label>
-            <div className="col-span-3 flex flex-wrap gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="rounded-lg h-8 text-xs"
-                onClick={() => shiftTime(-15)}
-              >
-                Başlangıç -15dk
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="rounded-lg h-8 text-xs"
-                onClick={() => shiftTime(15)}
-              >
-                Başlangıç +15dk
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="rounded-lg h-8 text-xs"
-                onClick={setEndToNow}
-              >
-                Bitiş: Şimdi
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={() => onOpenChange(false)} type="button">
-            İptal
-          </Button>
-          <Button onClick={handleSave} type="button">
-            Kaydet
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** ========= Reading Dialog (with DOI/BibTeX) ========= */
-function normalizeDoi(input: string) {
-  const raw = input.trim();
-  if (!raw) return "";
-  // accept "https://doi.org/..." or "doi:10...."
-  return raw
-    .replace(/^doi:\s*/i, "")
-    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
-    .trim();
-}
-
-function extractBibtexField(text: string, key: string) {
-  // supports: key = {..} or key = ".." (simple, non-nested)
-  const re = new RegExp(`${key}\\s*=\\s*(\\{([^}]*)\\}|"([^"]*)")`, "i");
-  const m = text.match(re);
-  if (!m) return "";
-  return (m[2] ?? m[3] ?? "").trim();
-}
-
-function mapBibtexTypeToReadingType(entryType: string): ReadingType {
-  const t = (entryType || "").toLowerCase();
-
-  // books
-  if (t === "book") return "book";
-
-  // chapters
-  if (t === "incollection" || t === "inbook" || t === "bookchapter" || t === "chapter") return "chapter";
-
-  // theses
-  if (t === "phdthesis" || t === "mastersthesis" || t === "thesis") return "thesis";
-
-  // articles / proceedings
-  if (t === "article" || t === "inproceedings" || t === "proceedings" || t === "conference") return "article";
-
-  return "other";
-}
-
-function pickYearFromCrossref(message: any): string {
-  const candidates = [
-    message?.issued,
-    message?.published,
-    message?.["published-print"],
-    message?.["published-online"],
-    message?.created,
-    message?.deposited,
-  ];
-
-  for (const c of candidates) {
-    const y = c?.["date-parts"]?.[0]?.[0];
-    if (y && Number.isFinite(Number(y))) return String(y);
-  }
-
-  // sometimes it's a plain date string
-  const dateStr =
-    message?.created?.["date-time"] ||
-    message?.published?.["date-time"] ||
-    message?.issued?.["date-time"] ||
-    message?.["published-online"]?.["date-time"] ||
-    "";
-
-  const m = String(dateStr).match(/(\d{4})/);
-  return m ? m[1] : "";
-}
-
-function ReadingDialog({
-  isOpen,
-  onOpenChange,
-  initialData,
-  onSave,
-  toast,
-}: {
-  isOpen: boolean;
-  onOpenChange: (o: boolean) => void;
-  initialData?: ReadingItem | null;
-  onSave: (item: ReadingItem) => void;
-  toast: (type: ToastType, message: string, title?: string) => void;
-}) {
-  const [form, setForm] = useState({
-    title: "",
-    authors: "",
-    year: "",
-    type: "book" as ReadingType,
-    status: "to_read" as ReadingStatus,
-    tags: "",
-    url: "",
-    doi: "",
-    notes: "",
-  });
-  const [isFetchingDoi, setIsFetchingDoi] = useState(false);
-  const [showBibtexInput, setShowBibtexInput] = useState(false);
-  const [bibtexInput, setBibtexInput] = useState("");
-
-  useEffect(() => {
-    if (!isOpen) return;
-    if (initialData) {
-      setForm({
-        title: initialData.title,
-        authors: initialData.authors ?? "",
-        year: initialData.year ?? "",
-        type: initialData.type,
-        status: initialData.status,
-        tags: (initialData.tags ?? []).join(", "),
-        url: initialData.url ?? "",
-        doi: initialData.doi ?? "",
-        notes: initialData.notes ?? "",
-      });
-    } else {
-      setForm({ title: "", authors: "", year: "", type: "book", status: "to_read", tags: "", url: "", doi: "", notes: "" });
-      setShowBibtexInput(false);
-      setBibtexInput("");
-    }
-  }, [isOpen, initialData]);
-
-  // DOI Fetch Logic (Crossref) — includes year parsing fix
-  const handleFetchDoi = async () => {
-    const doiNorm = normalizeDoi(form.doi);
-    if (!doiNorm) {
-      toast("error", "Lütfen bir DOI girin.", "DOI Hatası");
-      return;
-    }
-    setIsFetchingDoi(true);
-    try {
-      const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doiNorm)}`);
-      if (!response.ok) throw new Error("Kaynak bulunamadı");
-
-      const data = await response.json();
-      const item = data.message;
-
-      const title = Array.isArray(item.title) ? item.title[0] : item.title || "";
-      const authors = item.author ? item.author.map((a: any) => `${a.given || ""} ${a.family || ""}`.trim()).filter(Boolean).join(", ") : "";
-      const year = pickYearFromCrossref(item);
-
-      if (!title) throw new Error("Başlık bulunamadı");
-
-      const crossrefUrl = item.URL || (doiNorm ? `https://doi.org/${doiNorm}` : "");
-
-      setForm((prev) => ({
-        ...prev,
-        title,
-        authors: authors || prev.authors,
-        year: year || prev.year,
-        doi: doiNorm,
-        url: prev.url || crossrefUrl,
-      }));
-      toast("success", "Bilgiler çekildi.");
-    } catch (err: any) {
-      toast("error", err.message || "DOI çekilemedi.", "Hata");
-    } finally {
-      setIsFetchingDoi(false);
-    }
-  };
-
-  // BibTeX Parse Logic — includes type mapping
-  const handleImportBibtex = () => {
-    const text = bibtexInput.trim();
-    if (!text) {
-      setShowBibtexInput(false);
-      return;
-    }
-
-    const entryTypeMatch = text.match(/@(\w+)\s*{/i);
-    const entryType = entryTypeMatch?.[1] ?? "";
-
-    const title = extractBibtexField(text, "title");
-    const author = extractBibtexField(text, "author");
-    const year = extractBibtexField(text, "year");
-    const doi = extractBibtexField(text, "doi");
-    const url = extractBibtexField(text, "url");
-
-    const mappedType = entryType ? mapBibtexTypeToReadingType(entryType) : undefined;
-
-    if (title || author) {
-      // normalize authors: "A and B and C" -> "A, B, C"
-      const normalizedAuthors = author ? author.replace(/\s+and\s+/gi, ", ").trim() : "";
-
-      setForm((prev) => ({
-        ...prev,
-        title: title || prev.title,
-        authors: normalizedAuthors || prev.authors,
-        year: year || prev.year,
-        doi: doi ? normalizeDoi(doi) : prev.doi,
-        url: url || prev.url,
-        type: mappedType ?? prev.type,
-      }));
-
-      toast("success", "BibTeX içe aktarıldı.");
-      setShowBibtexInput(false);
-      setBibtexInput("");
-    } else {
-      toast("error", "Geçerli bir BibTeX formatı bulunamadı.", "Hata");
-    }
-  };
-
-  const save = () => {
-    if (!form.title.trim()) {
-      toast("error", "Başlık boş olamaz.", "Hata");
-      return;
-    }
-
-    const item: ReadingItem = {
-      id: initialData?.id ?? uid(),
-      title: form.title.trim(),
-      authors: form.authors.trim() || undefined,
-      year: form.year.trim() || undefined,
-      type: form.type,
-      status: form.status,
-      tags: parseTags(form.tags),
-      url: form.url.trim() || undefined,
-      doi: normalizeDoi(form.doi) || undefined,
-      notes: form.notes.trim() || undefined,
-      updatedAt: Date.now(),
-    };
-
-    onSave(item);
-    toast("success", initialData ? "Kaynak güncellendi." : "Kaynak eklendi.");
-    onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[780px] max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{initialData ? "Kaynağı Düzenle" : "Yeni Kaynak Ekle"}</DialogTitle>
-          <ShadcnDialogDescription>Okuduğun kitap/makaleyi kütüphanene ekle.</ShadcnDialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-4 py-4">
-          <div className="flex justify-end">
-            <Button type="button" variant="outline" size="sm" onClick={() => setShowBibtexInput(!showBibtexInput)}>
-              <Database className="mr-2 h-4 w-4" /> {showBibtexInput ? "BibTeX Gizle" : "BibTeX Yapıştır"}
-            </Button>
-          </div>
-
-          {showBibtexInput ? (
-            <div className="space-y-2">
-              <Label>BibTeX Metni</Label>
-              <textarea
-                className="w-full min-h-[120px] rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3 text-sm font-mono"
-                value={bibtexInput}
-                onChange={(e) => setBibtexInput(e.target.value)}
-                placeholder='@article{key, title={...}, author={...}, year={...}, doi={...}}'
-              />
-              <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setShowBibtexInput(false)}>
-                  İptal
-                </Button>
-                <Button type="button" onClick={handleImportBibtex}>
-                  İçe Aktar
-                </Button>
-              </div>
-              <div className="text-[11px] text-muted-foreground">
-                Desteklenen tür eşleşmeleri: book→Kitap, incollection/inbook→Bölüm, phdthesis/mastersthesis→Tez, article/inproceedings→Makale.
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Başlık</Label>
-                <Input className="col-span-3" value={form.title} onChange={(e) => setForm((p) => ({ ...p, title: e.target.value }))} placeholder="Örn: Debt (Graeber)" />
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">DOI</Label>
-                <div className="col-span-3 flex gap-2">
-                  <Input className="flex-1" value={form.doi} onChange={(e) => setForm((p) => ({ ...p, doi: e.target.value }))} placeholder="10.1080/... veya https://doi.org/..." />
-                  <Button type="button" variant="secondary" onClick={handleFetchDoi} disabled={isFetchingDoi}>
-                    {isFetchingDoi ? <Loader2 className="h-4 w-4 animate-spin" /> : "Getir"}
-                  </Button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Yazar(lar)</Label>
-                <Input className="col-span-3" value={form.authors} onChange={(e) => setForm((p) => ({ ...p, authors: e.target.value }))} placeholder="Örn: David Graeber" />
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Yıl</Label>
-                <Input className="col-span-3" value={form.year} onChange={(e) => setForm((p) => ({ ...p, year: e.target.value }))} placeholder="Örn: 2011" />
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Tür</Label>
-                <Select value={form.type} onValueChange={(v) => setForm((p) => ({ ...p, type: v as ReadingType }))}>
-                  <SelectTrigger className="col-span-3">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="book">Kitap</SelectItem>
-                    <SelectItem value="article">Makale</SelectItem>
-                    <SelectItem value="chapter">Kitap Bölümü</SelectItem>
-                    <SelectItem value="thesis">Tez</SelectItem>
-                    <SelectItem value="other">Diğer</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Durum</Label>
-                <Select value={form.status} onValueChange={(v) => setForm((p) => ({ ...p, status: v as ReadingStatus }))}>
-                  <SelectTrigger className="col-span-3">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="to_read">Okunacak</SelectItem>
-                    <SelectItem value="reading">Okunuyor</SelectItem>
-                    <SelectItem value="done">Bitti</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Etiketler</Label>
-                <Input className="col-span-3" value={form.tags} onChange={(e) => setForm((p) => ({ ...p, tags: e.target.value }))} placeholder="virgülle ayır: antropoloji, emek, değer" />
-              </div>
-
-              <div className="grid grid-cols-4 items-center gap-4">
-                <Label className="text-right">Link</Label>
-                <Input className="col-span-3" value={form.url} onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))} placeholder="https://..." />
-              </div>
-
-              <div className="grid grid-cols-4 items-start gap-4">
-                <Label className="text-right pt-2">Notlar</Label>
-                <div className="col-span-3">
-                  <textarea
-                    className="w-full min-h-[120px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-3 text-sm"
-                    value={form.notes}
-                    onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))}
-                    placeholder="Özet, alıntı, sayfa referansı, tartışma notları..."
-                  />
-                  <div className="text-[11px] text-muted-foreground mt-1">
-                    İpucu: Oturumlara “Kaynak” seçerek okuma süreni kaynağa bağlayabilirsin.
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button onClick={save} type="button">
-            Kaydet
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** ========= BibTeX Parser Helper (BUNU EKLE) ========= */
-function parseBulkBibtex(fileContent: string): ReadingItem[] {
-  const rawEntries = fileContent.split(/^@/m).filter((e) => e.trim().length > 10);
-  const items: ReadingItem[] = [];
-
-  rawEntries.forEach((entryRaw) => {
-    const typeMatch = entryRaw.match(/^(\w+)\s*\{([^,]+),/);
-    if (!typeMatch) return;
-
-    const entryType = typeMatch[1].toLowerCase();
-    const bibKey = typeMatch[2].trim();
-
-    const getField = (key: string) => {
-      const re = new RegExp(`${key}\\s*=\\s*[\\{"](.*?)[\\}"](?=,\\s*\\n|\\s*\\})`, "is");
-      const m = entryRaw.match(re);
-      return m ? m[1].replace(/[\n\r]+/g, " ").replace(/\s+/g, " ").trim() : "";
-    };
-
-    const title = getField("title").replace(/[{}]/g, "");
-    const author = getField("author").replace(/\s+and\s+/gi, ", ").replace(/[{}]/g, "");
-    const year = getField("year");
-    const doi = getField("doi");
-    const url = getField("url");
-    const abstract = getField("abstract");
-    const keywords = getField("keywords"); 
-
-    let type: ReadingType = "other";
-    if (entryType.includes("book")) type = "book";
-    else if (entryType.includes("article") || entryType.includes("periodical")) type = "article";
-    else if (entryType.includes("incollection") || entryType.includes("chapter")) type = "chapter";
-    else if (entryType.includes("thesis")) type = "thesis";
-
-    if (title) {
-      items.push({
-        id: `bib_${bibKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        title,
-        authors: author,
-        year,
-        type,
-        status: "to_read",
-        tags: keywords ? keywords.split(/[,;]/).map(t => t.trim()) : [],
-        doi,
-        url,
-        notes: abstract ? `Özet: ${abstract.substring(0, 300)}...` : "",
-        updatedAt: Date.now(),
-      });
-    }
-  });
-  return items;
-}
+import {
+  Category,
+  Topic,
+  ReadingStatus,
+  ReadingType,
+  ReadingItem,
+  Session,
+  Running,
+  DailyLog,
+  Milestone,
+  Snapshot,
+  CloudStatus,
+  RangeFilter,
+  ReadingStatusFilter
+} from "@/types/tracking";
+
+import {
+  OLD_COLOR_MAP,
+  DEFAULT_CATEGORIES,
+  DEFAULT_TOPICS,
+  getRandomBrightColor,
+  LS_CATEGORIES,
+  LS_TOPICS,
+  LS_READING,
+  LS_SESSIONS,
+  LS_TARGET,
+  LS_UPDATED_AT,
+  LS_RUNNING,
+  LS_LOGS,
+  LS_MILESTONES
+} from "@/lib/constants";
+
+import {
+  fmtTime,
+  fmtDuration,
+  fmtCompact,
+  fmtHmFromMs,
+  fmtHmFromHours,
+  pad2
+} from "@/lib/formatters";
+
+import {
+  uid,
+  startOfDayMs,
+  startOfWeekMs,
+  sessionDurationMs,
+  wallDurationMs,
+  overlapActiveMs,
+  getCategoryPlaceholder,
+  getUniqueLabelsForCategory,
+  parseTags,
+  roundToNearest5Min
+} from "@/lib/helpers";
+
+import { parseBulkBibtex } from "@/lib/bibtex";
+
+import { supabase } from "@/lib/supabase";
+import { usePersistentState } from "@/hooks/usePersistentState";
+
+import { ActiveTimer } from "@/components/tracking/ActiveTimer";
+import { ActivityHeatmap } from "@/components/tracking/ActivityHeatmap";
+import { SessionDialog } from "@/components/tracking/SessionDialog";
+import { ReadingDialog } from "@/components/tracking/ReadingDialog";
+import { ThesisDashboard } from "@/components/tracking/ThesisDashboard";
+import { ProjectTimeline } from "@/components/tracking/ProjectTimeline";
+import { Scratchpad } from "@/components/tracking/Scratchpad";
+import { ChapterBoard } from "@/components/tracking/ChapterBoard";
+import { WritingAnalytics } from "@/components/tracking/WritingAnalytics";
+import { fetchZoteroItems } from "@/lib/zotero";
+import { WordCountDialog } from "@/components/tracking/WordCountDialog";
+import { MilestoneDialog } from "@/components/tracking/MilestoneDialog";
+import { MilestonesWidget } from "@/components/tracking/MilestonesWidget";
+
+import { MiniDateTimePicker } from "@/components/ui/custom/MiniDateTimePicker";
+import { ToastViewport, ToastItem, ToastType } from "@/components/ui/custom/ToastViewport";
+import { ConfirmDialog } from "@/components/ui/custom/ConfirmDialog";
+
+import { useTheme } from "@/hooks/useTheme";
+import { useReminders } from "@/hooks/useReminders";
+import { ReminderPanel } from "@/components/tracking/ReminderPanel";
+import { ChapterDialog } from "@/components/tracking/ChapterDialog";
+import { Chapter, Project, ProjectType } from "@/types/tracking";
+import { FolderPlus, Layout, GraduationCap, Book, FileText } from "lucide-react";
 
 
 /** ========= Page ========= */
 export default function Page() {
   // 1. BU SATIRLARI EKLE (Mevcut kodunun en başına)
-const [isMounted, setIsMounted] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
 
-useEffect(() => {
-  setIsMounted(true);
-}, []);
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  // Theme hook initialization
+  useTheme();
+
   /** ========= Toast state ========= */
   const toastActionsRef = useRef<Map<string, () => void>>(new Map());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const removeToast = (id: string) => {
-  setToasts((prev) => {
-    const t = prev.find((x) => x.id === id);
-    if (t?.actionId) toastActionsRef.current.delete(t.actionId);
-    return prev.filter((x) => x.id !== id);
-  });
-};
-// --- Zotero State ---
+    setToasts((prev) => {
+      const t = prev.find((x) => x.id === id);
+      if (t?.actionId) toastActionsRef.current.delete(t.actionId);
+      return prev.filter((x) => x.id !== id);
+    });
+  };
+  // --- Zotero State ---
   const [zoteroDialogOpen, setZoteroDialogOpen] = useState(false);
   // Anahtarları tarayıcı hafızasında (localStorage) tutuyoruz, böylece her seferinde girmene gerek kalmaz.
   const [zoteroApiKey, setZoteroApiKey] = usePersistentState("talip-v2.zotero_api_key", "");
@@ -1822,12 +220,22 @@ useEffect(() => {
   const [dailyTarget, setDailyTarget] = usePersistentState<number>(LS_TARGET, 2);
   const [localUpdatedAt, setLocalUpdatedAt] = usePersistentState<number>(LS_UPDATED_AT, 0);
 
-// ... const [reading, setReading...] satırının altı ...
+  // ... const [reading, setReading...] satırının altı ...
+
+  // --- YENİ STATE'LER ---
+  const [dailyLogs, setDailyLogs] = usePersistentState<DailyLog[]>(LS_LOGS, []);
+  const [milestones, setMilestones] = usePersistentState<Milestone[]>(LS_MILESTONES, []);
+  const [wordCountOpen, setWordCountOpen] = useState(false);
+  const [milestoneOpen, setMilestoneOpen] = useState(false);
+
+  // Bugünün verisi
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayLog = dailyLogs.find(l => l.date === todayStr);
 
   // --- BibTeX Import State (BUNU EKLE) ---
   const [isImportingBib, setIsImportingBib] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
+
   /** ========= Runtime state ========= */
   const [running, setRunning] = useState<Running | null>(null);
 
@@ -1838,6 +246,7 @@ useEffect(() => {
   const [quickCat, setQuickCat] = useState<string>("");
   const [quickTopicId, setQuickTopicId] = useState<string>("none");
   const [quickSourceId, setQuickSourceId] = useState<string>("none");
+  const [quickProjectId, setQuickProjectId] = useState<string>("none");
   const [quickLabel, setQuickLabel] = useState("");
 
   // Filters (sessions)
@@ -1861,6 +270,82 @@ useEffect(() => {
   const [editingReading, setEditingReading] = useState<ReadingItem | null>(null);
 
   const [resetOpen, setResetOpen] = useState(false);
+
+  // Chapter State
+  const [chapters, setChapters] = usePersistentState<Chapter[]>("chapters", []);
+  const [editingChapter, setEditingChapter] = useState<Chapter | null>(null);
+  const [isChapterDialogOpen, setIsChapterDialogOpen] = useState(false);
+
+  // --- PROJECT STATE & MIGRATION ---
+  const [projects, setProjects] = usePersistentState<Project[]>("projects", []);
+  const [selectedProjectId, setSelectedProjectId] = usePersistentState<string>("selectedProjectId", "");
+  const [isNewProjectDialogOpen, setIsNewProjectDialogOpen] = useState(false);
+  const [newProjectTitle, setNewProjectTitle] = useState("");
+  const [newProjectType, setNewProjectType] = useState<ProjectType>("other");
+  const [newProjectGoal, setNewProjectGoal] = useState("50000");
+
+  // Migration: Init default project if none exists
+  useEffect(() => {
+    if (isMounted && projects.length === 0) {
+      const defaultProject: Project = {
+        id: "default-thesis",
+        title: "Doktora Tezi",
+        type: "thesis",
+        goal: 80000,
+        createdAt: Date.now(),
+        categoryId: "phd" // Assuming 'phd' is the default thesis category id
+      };
+      setProjects([defaultProject]);
+      setSelectedProjectId("default-thesis");
+
+      // Migrate existing chapters to this project
+      setChapters(prev => prev.map(c => ({ ...c, projectId: "default-thesis" })));
+
+      toast("info", "Mevcut veriler 'Doktora Tezi' projesine taşındı.");
+    } else if (isMounted && !selectedProjectId && projects.length > 0) {
+      setSelectedProjectId(projects[0].id);
+    }
+  }, [isMounted, projects.length, selectedProjectId, setProjects, setSelectedProjectId, setChapters, toast]);
+
+  const activeProject = useMemo(() => {
+    return projects.find(p => p.id === selectedProjectId) || projects[0];
+  }, [projects, selectedProjectId]);
+
+  const filteredChapters = useMemo(() => {
+    return activeProject ? chapters.filter(c => c.projectId === activeProject.id) : [];
+  }, [chapters, activeProject]);
+
+  const handleAddProject = () => {
+    if (!newProjectTitle.trim()) return;
+
+    const newProject: Project = {
+      id: uid(),
+      title: newProjectTitle.trim(),
+      type: newProjectType,
+      goal: parseInt(newProjectGoal) || 50000,
+      createdAt: Date.now()
+    };
+
+    setProjects(prev => [...prev, newProject]);
+    setSelectedProjectId(newProject.id);
+    setIsNewProjectDialogOpen(false);
+    setNewProjectTitle("");
+    setNewProjectGoal("50000");
+    toast("success", "Yeni proje oluşturuldu.");
+  };
+
+  const handleChapterSave = (chapter: Chapter) => {
+    setChapters(prev => {
+      const exists = prev.find(c => c.id === chapter.id);
+      if (exists) {
+        return prev.map(c => c.id === chapter.id ? chapter : c);
+      }
+      // Ensure new chapters get the active project ID
+      return [...prev, { ...chapter, projectId: activeProject?.id || "default-thesis" }];
+    });
+    setEditingChapter(null);
+    toast("success", "Bölüm kaydedildi.");
+  };
 
   // Confirm dialogs
   const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
@@ -1900,6 +385,8 @@ useEffect(() => {
     sessions,
     dailyTarget,
     localUpdatedAt,
+    dailyLogs,
+    milestones,
   });
 
   useEffect(() => {
@@ -1910,8 +397,10 @@ useEffect(() => {
       sessions,
       dailyTarget,
       localUpdatedAt,
+      dailyLogs,
+      milestones,
     };
-  }, [categories, topics, reading, sessions, dailyTarget, localUpdatedAt]);
+  }, [categories, topics, reading, sessions, dailyTarget, localUpdatedAt, dailyLogs, milestones]);
 
   /** ========= Cloud RLS/policy helper ========= */
   const formatCloudError = useCallback((msg: string) => {
@@ -1967,6 +456,7 @@ useEffect(() => {
 
   /** ========= Maps ========= */
   const categoryMap = useMemo(() => new Map((categories ?? []).map((c) => [c.id, c])), [categories]);
+  const projectMap = useMemo(() => new Map((projects ?? []).map((p) => [p.id, p])), [projects]);
   const topicMap = useMemo(() => new Map((topics ?? []).map((t) => [t.id, t])), [topics]);
   const readingMap = useMemo(() => new Map((reading ?? []).map((r) => [r.id, r])), [reading]);
 
@@ -2053,6 +543,14 @@ useEffect(() => {
     return r.elapsedActiveMs + (nowMs - r.lastStart);
   }, []);
 
+  // Reminders
+  const { reminders, dismissReminder } = useReminders({
+    sessions,
+    dailyLogs,
+    milestones,
+    categories
+  });
+
   const pauseRunning = useCallback(() => {
     setRunning((r) => {
       if (!r || r.isPaused) return r;
@@ -2080,6 +578,7 @@ useEffect(() => {
       categoryId: catId,
       topicId: quickTopicId && quickTopicId !== "none" ? quickTopicId : undefined,
       sourceId: quickSourceId && quickSourceId !== "none" ? quickSourceId : undefined,
+      projectId: quickProjectId && quickProjectId !== "none" ? quickProjectId : undefined,
       label: quickLabel.trim(),
       wallStart: now,
       lastStart: now,
@@ -2088,7 +587,7 @@ useEffect(() => {
     };
 
     setRunning(next);
-  }, [running, quickCat, categories, quickTopicId, quickSourceId, quickLabel]);
+  }, [running, quickCat, categories, quickTopicId, quickSourceId, quickProjectId, quickLabel]);
 
   const stopSessionFixed = useCallback(() => {
     if (!running) return;
@@ -2105,18 +604,27 @@ useEffect(() => {
       categoryId: running.categoryId,
       topicId: running.topicId,
       sourceId: running.sourceId,
+      projectId: running.projectId,
+      chapterId: running.chapterId,
       label: running.label,
       start: wallStart,
       end: now,
       pausedMs,
     };
 
+    // Check for writing session to prompt word count
+    const cat = categoryMap.get(running.categoryId);
+    const catName = cat?.name.toLowerCase() || "";
+    if (catName.includes("yazma") || catName.includes("tez") || catName.includes("write") || catName.includes("thesis")) {
+      setWordCountOpen(true);
+    }
+
     setSessions((prev) => [newSession, ...(prev ?? [])]);
     setLocalUpdatedAt(Date.now());
     setRunning(null);
     setQuickLabel("");
     toast("success", "Kayıt kaydedildi.");
-  }, [running, currentActiveMs, setSessions, setLocalUpdatedAt, toast]);
+  }, [running, currentActiveMs, setSessions, setLocalUpdatedAt, toast, categoryMap, setWordCountOpen]);
 
   /** ========= Undo helpers ========= */
   const scheduleUndo = useCallback(
@@ -2340,14 +848,14 @@ useEffect(() => {
 
     setIsImportingBib(true);
     const reader = new FileReader();
-    
+
     reader.onload = (event) => {
       const text = event.target?.result as string;
       if (!text) return;
 
       try {
         const newItems = parseBulkBibtex(text);
-        
+
         if (newItems.length === 0) {
           toast("error", "Dosyada geçerli kayıt bulunamadı.");
           setIsImportingBib(false);
@@ -2359,14 +867,14 @@ useEffect(() => {
           const uniqueNew = newItems.filter(i => !existingTitles.has(i.title.toLowerCase()));
 
           if (uniqueNew.length === 0) {
-             toast("info", "Bu kaynaklar zaten kütüphanenizde var.");
-             return prev;
+            toast("info", "Bu kaynaklar zaten kütüphanenizde var.");
+            return prev;
           }
 
           toast("success", `${uniqueNew.length} kaynak eklendi.`);
           return [...uniqueNew, ...prev].sort((a, b) => b.updatedAt - a.updatedAt);
         });
-        
+
         setLocalUpdatedAt(Date.now());
 
       } catch (err) {
@@ -2446,6 +954,8 @@ useEffect(() => {
         setReading(Array.isArray(snap.reading) ? snap.reading : []);
         setSessions(Array.isArray(snap.sessions) ? snap.sessions : []);
         setDailyTarget(typeof snap.dailyTarget === "number" ? snap.dailyTarget : 2);
+        setDailyLogs(Array.isArray(snap.dailyLogs) ? snap.dailyLogs : []);
+        setMilestones(Array.isArray(snap.milestones) ? snap.milestones : []);
         setLocalUpdatedAt(remoteMs);
 
         window.setTimeout(() => {
@@ -2468,6 +978,56 @@ useEffect(() => {
     [pushToCloud, setCategories, setTopics, setReading, setSessions, setDailyTarget, setLocalUpdatedAt, toast, formatCloudError]
   );
 
+  // --- YENİ HELPER FONKSİYONLAR ---
+  const handleWordCountSave = (count: number, note: string) => {
+    setDailyLogs(prev => {
+      const others = prev.filter(l => l.date !== todayStr);
+
+      // Calculate delta to attribute to active project
+      const existing = prev.find(l => l.date === todayStr);
+      const oldTotal = existing?.wordCount || 0;
+      const delta = count - oldTotal;
+
+      let newBreakdown = existing?.projectBreakdown || {};
+
+      if (delta !== 0) {
+        const targetProjId = activeProject?.id || "default-thesis";
+        const currentVal = newBreakdown[targetProjId] || 0;
+        // Ensure we don't go below zero for a project
+        const newVal = Math.max(0, currentVal + delta);
+
+        newBreakdown = {
+          ...newBreakdown,
+          [targetProjId]: newVal
+        };
+      }
+
+      return [...others, {
+        date: todayStr,
+        wordCount: count,
+        note,
+        projectBreakdown: newBreakdown
+      }].sort((a, b) => b.date.localeCompare(a.date));
+    });
+    setLocalUpdatedAt(Date.now());
+    toast("success", "Kelime sayısı kaydedildi.");
+  };
+
+  const handleAddMilestone = (title: string, date: number) => {
+    setMilestones(prev => [...prev, { id: uid(), title, date, done: false }]);
+    setLocalUpdatedAt(Date.now());
+    toast("success", "Hedef eklendi.");
+  };
+
+  const deleteMilestone = (id: string) => {
+    setMilestones(prev => prev.filter(m => m.id !== id));
+    setLocalUpdatedAt(Date.now());
+  };
+
+  const toggleMilestone = (id: string) => {
+    setMilestones(prev => prev.map(m => m.id === id ? { ...m, done: !m.done } : m));
+    setLocalUpdatedAt(Date.now());
+  };
   useEffect(() => {
     if (!supabase) return;
     if (!catsHydrated || !topicsHydrated || !readingHydrated || !sessionsHydrated) return;
@@ -2507,11 +1067,11 @@ useEffect(() => {
 
   // --- Zotero Helpers ---
 
-  // 1. Zotero API'sine giden yard�mc� fonksiyon
+  // 1. Zotero API'sine giden yardmc fonksiyon
   const fetchZoteroLibrary = async (apiKey: string, userId: string) => {
-    // Son eklenen 50 kayna�� �eker.
+    // Son eklenen 50 kayna eker.
     const url = `https://api.zotero.org/users/${userId}/items?format=json&limit=50&sort=dateAdded&direction=desc&itemType=-attachment || note`;
-    
+
     const res = await fetch(url, {
       headers: { "Zotero-API-Key": apiKey },
     });
@@ -2524,39 +1084,39 @@ useEffect(() => {
 
     const data = await res.json();
 
-    // Zotero verisini senin uygulaman�n format�na (ReadingItem) �eviriyoruz
+    // Zotero verisini senin uygulamann formatna (ReadingItem) eviriyoruz
     const mappedItems: ReadingItem[] = data.map((z: any) => {
       const d = z.data;
-      
-      // Yazarlar� birle�tir
+
+      // Yazarlar birletir
       const authors = d.creators
         ? d.creators.map((c: any) => `${c.firstName || ''} ${c.lastName || ''}`.trim()).join(", ")
         : "";
 
-      // T�rleri e�le�tir
+      // Trleri eletir
       let type: ReadingType = "other";
       if (d.itemType === "book") type = "book";
       else if (d.itemType === "journalArticle") type = "article";
       else if (d.itemType === "bookSection") type = "chapter";
       else if (d.itemType === "thesis") type = "thesis";
 
-      // Y�l� bul
+      // Yl bul
       const dateStr = d.date || "";
       const yearMatch = dateStr.match(/\d{4}/);
       const year = yearMatch ? yearMatch[0] : "";
 
       return {
-        id: `zotero_${d.key}`, // ID �ak��mas�n� �nlemek i�in prefix
+        id: `zotero_${d.key}`, // ID akmasn nlemek iin prefix
         zoteroKey: d.key,
-        title: d.title || "(Ba�l�ks�z)",
+        title: d.title || "(Balksz)",
         authors: authors,
         year: year,
         type: type,
-        status: "to_read", // Varsay�lan olarak "Okunacak" eklenir
+        status: "to_read", // Varsaylan olarak "Okunacak" eklenir
         tags: d.tags ? d.tags.map((t: any) => t.tag) : [],
         url: d.url || "",
         doi: d.DOI || "",
-        notes: d.abstractNote || "", // �zeti notlara ekle
+        notes: d.abstractNote || "", // zeti notlara ekle
         updatedAt: Date.now(),
       };
     });
@@ -2564,7 +1124,7 @@ useEffect(() => {
     return mappedItems;
   };
 
-  // 2. Butona bas�ld���nda �al��acak ana fonksiyon
+  // 2. Butona basldnda alacak ana fonksiyon
   const handleZoteroSync = async () => {
     if (!zoteroApiKey || !zoteroUserId) {
       toast("error", "Lütfen API Key ve User ID alanlarını doldurun.");
@@ -2573,25 +1133,25 @@ useEffect(() => {
 
     setIsSyncingZotero(true);
     try {
-      const newItems = await fetchZoteroLibrary(zoteroApiKey, zoteroUserId);
-      
+      const newItems = await fetchZoteroItems({ apiKey: zoteroApiKey, userId: zoteroUserId });
+
       setReading((prev) => {
-        // Zaten ekli olanlar� tekrar ekleme (zoteroKey kontrol�)
+        // Zaten ekli olanları tekrar ekleme (zoteroKey kontrolü)
         const existingKeys = new Set(prev.map((p) => p.zoteroKey).filter(Boolean));
         const uniqueNew = newItems.filter((i) => !existingKeys.has(i.zoteroKey));
-        
+
         if (uniqueNew.length === 0) {
           toast("info", "Kütüphaneniz güncel, yeni kaynak bulunamadı.");
           return prev;
         }
-        
+
         toast("success", `${uniqueNew.length} yeni kaynak Zotero'dan eklendi.`);
-        // Yeni gelenleri listenin en ba��na koy
+        // Yeni gelenleri listenin en başına koy
         return [...uniqueNew, ...prev].sort((a, b) => b.updatedAt - a.updatedAt);
       });
-      
+
       setLocalUpdatedAt(Date.now());
-      setZoteroDialogOpen(false); // ��lem bitince pencereyi kapat
+      setZoteroDialogOpen(false); // İşlem bitince pencereyi kapat
     } catch (err: any) {
       toast("error", err.message || "Zotero eşitleme hatası.");
     } finally {
@@ -2799,6 +1359,107 @@ useEffect(() => {
       monthlyTotalHours: Number(monthlyTotalHours.toFixed(1)),
     };
   }, [sessions, stackKeys]);
+  /** ========= YENİ: Kelime Sayısı Analizi (Word Count Analytics) ========= */
+  const wordChartData = useMemo(() => {
+    // 1. Günlük (Son 7 Gün)
+    const daily: Array<{ name: string; fullDate: string; words: number }> = [];
+    let dailyTotalWords = 0;
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toLocaleDateString("tr-TR").split(".").reverse().join("-"); // YYYY-MM-DD (Yerel saate göre basit format)
+      // Alternatif (ISO): const dateStr = d.toISOString().slice(0, 10);
+
+      // dailyLogs içindeki format ile eşleşmeli. (Genelde YYYY-MM-DD tutuyoruz)
+      // En garantisi: dailyLogs'daki tarih stringi ile buradaki üretilen stringi karşılaştırmak.
+      // Basitlik adına burada tarih stringini dailyLogs'daki formata uyduruyoruz.
+
+      // dailyLogs.find... yerine filter kullanıp toplamak daha güvenli olabilir (aynı güne birden fazla kayıt varsa)
+      // Ancak şu anki yapımızda günde tek kayıt var.
+
+      // Eşleşme için basit yöntem:
+      const matchLog = dailyLogs.find(l => {
+        const lDate = new Date(l.date);
+        return lDate.getDate() === d.getDate() && lDate.getMonth() === d.getMonth() && lDate.getFullYear() === d.getFullYear();
+      });
+
+      const count = matchLog ? matchLog.wordCount : 0;
+      dailyTotalWords += count;
+
+      daily.push({
+        name: d.toLocaleDateString("tr-TR", { weekday: "short" }),
+        fullDate: d.toLocaleDateString("tr-TR", { day: "numeric", month: "long" }),
+        words: count,
+      });
+    }
+
+    // 2. Haftalık (Son 4 Hafta)
+    const weekly: Array<{ name: string; words: number }> = [];
+    let weeklyTotalWords = 0;
+
+    for (let i = 3; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i * 7);
+
+      const start = startOfWeekMs(d);
+      const end = start + 7 * 86400000;
+
+      let total = 0;
+      dailyLogs.forEach(log => {
+        const logTime = new Date(log.date).getTime();
+        // logTime bazen 00:00 olmayabilir, gün bazlı kontrol daha sağlıklıdır ama şimdilik ms ile:
+        if (logTime >= start && logTime < end) {
+          total += log.wordCount;
+        }
+      });
+
+      weeklyTotalWords += total;
+
+      const monday = new Date(start);
+      weekly.push({
+        name: `${monday.getDate()} ${monday.toLocaleDateString("tr-TR", { month: "short" })}`,
+        words: total,
+      });
+    }
+
+    // 3. Aylık (Son 6 Ay)
+    const monthly: Array<{ name: string; words: number }> = [];
+    let monthlyTotalWords = 0;
+
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date();
+      d.setMonth(d.getMonth() - i);
+      d.setDate(1);
+
+      const currentMonth = d.getMonth();
+      const currentYear = d.getFullYear();
+
+      let total = 0;
+      dailyLogs.forEach(log => {
+        const logDate = new Date(log.date);
+        if (logDate.getMonth() === currentMonth && logDate.getFullYear() === currentYear) {
+          total += log.wordCount;
+        }
+      });
+
+      monthlyTotalWords += total;
+
+      monthly.push({
+        name: d.toLocaleDateString("tr-TR", { month: "short", year: "2-digit" }),
+        words: total,
+      });
+    }
+
+    return {
+      daily,
+      dailyTotalWords,
+      weekly,
+      weeklyTotalWords,
+      monthly,
+      monthlyTotalWords
+    };
+  }, [dailyLogs]);
 
   /** ========= Category distribution (7d) ========= */
   const categoryDistribution7d = useMemo(() => {
@@ -2866,6 +1527,13 @@ useEffect(() => {
 
     return (sessions ?? [])
       .filter((s) => {
+        // Project filter (based on selected project)
+        if (activeProject && activeProject.id !== "default-thesis") {
+          if (s.projectId && s.projectId !== activeProject.id) return false;
+          // For legacy sessions without projectId, check categoryId
+          if (!s.projectId && activeProject.categoryId && s.categoryId !== activeProject.categoryId) return false;
+        }
+
         if (rangeFilter === "today") {
           if (overlapActiveMs(s, dayStart, dayEnd) <= 0) return false;
         }
@@ -2885,7 +1553,7 @@ useEffect(() => {
         return catName.includes(q) || label.includes(q) || dateStr.includes(q) || topicName.includes(q) || sourceTitle.includes(q);
       })
       .sort((a, b) => b.start - a.start);
-  }, [sessions, searchQuery, rangeFilter, categoryFilter, categoryMap, topicMap, readingMap]);
+  }, [sessions, searchQuery, rangeFilter, categoryFilter, categoryMap, topicMap, readingMap, activeProject]);
 
   useEffect(() => {
     setPage(1);
@@ -2943,137 +1611,153 @@ useEffect(() => {
     toast("success", "CSV indirildi.");
   };
 
-  const loadDemoData = () => {
+  const loadComprehensiveDemo = () => {
     const now = Date.now();
+
+    // Demo Projeler
+    const demoProjects: Project[] = [
+      { id: "demo-thesis", title: "PhD Tez", type: "thesis", goal: 80000, deadline: now + 180 * 24 * 60 * 60 * 1000, createdAt: now - 90 * 24 * 60 * 60 * 1000, categoryId: "thesis" },
+      { id: "demo-article", title: "Akademik Makale", type: "article", goal: 8000, deadline: now + 30 * 24 * 60 * 60 * 1000, createdAt: now - 30 * 24 * 60 * 60 * 1000, categoryId: "writing" },
+    ];
+
+    // Demo Bolumler
+    const demoChapters: Chapter[] = [
+      { id: "ch1", title: "Giris ve Arastirma Sorusu", projectId: "demo-thesis", wordCountGoal: 5000, currentWordCount: 4200, status: "revision", order: 1, deadline: now + 14 * 24 * 60 * 60 * 1000 },
+      { id: "ch2", title: "Literatur Taramasi", projectId: "demo-thesis", wordCountGoal: 15000, currentWordCount: 12500, status: "revision", order: 2, deadline: now + 30 * 24 * 60 * 60 * 1000 },
+      { id: "ch3", title: "Metodoloji", projectId: "demo-thesis", wordCountGoal: 8000, currentWordCount: 3200, status: "draft", order: 3, deadline: now + 45 * 24 * 60 * 60 * 1000 },
+      { id: "ch4", title: "Bulgular", projectId: "demo-thesis", wordCountGoal: 20000, currentWordCount: 0, status: "draft", order: 4, deadline: now + 90 * 24 * 60 * 60 * 1000 },
+      { id: "ch5", title: "Tartisma ve Sonuc", projectId: "demo-thesis", wordCountGoal: 10000, currentWordCount: 0, status: "draft", order: 5, deadline: now + 120 * 24 * 60 * 60 * 1000 },
+      { id: "art1", title: "Makale Taslagi", projectId: "demo-article", wordCountGoal: 8000, currentWordCount: 5500, status: "revision", order: 1, deadline: now + 21 * 24 * 60 * 60 * 1000 },
+    ];
+
+    // Demo Kategoriler
     const demoCats: Category[] = [
-      { id: "phd", name: "PhD / Tez", color: "#6366f1" },
+      { id: "thesis", name: "PhD / Tez", color: "#6366f1" },
       { id: "reading", name: "Okuma", color: "#10b981" },
       { id: "writing", name: "Yazma", color: "#f97316" },
       { id: "notes", name: "Not / Zettelkasten", color: "#06b6d4" },
-      { id: "admin", name: "İdari", color: "#64748b" },
+      { id: "admin", name: "Idari", color: "#64748b" },
     ];
-    const mk = (daysAgo: number, startH: number, startM: number, durMin: number, categoryId: string, label: string) => {
+
+    // Demo Konular
+    const demoTopics: Topic[] = [
+      { id: "topic-theory", name: "Teori", color: "#8b5cf6" },
+      { id: "topic-method", name: "Metodoloji", color: "#ec4899" },
+      { id: "topic-data", name: "Veri Analizi", color: "#14b8a6" },
+    ];
+
+    // Demo Okuma Listesi
+    const demoReadings: ReadingItem[] = [
+      { id: "r1", title: "Debt: The First 5000 Years", authors: "David Graeber", year: "2011", type: "book", status: "done", tags: ["antropoloji", "ekonomi"], updatedAt: now - 5 * 24 * 60 * 60 * 1000, notes: "Anahtar kaynak - borc ve toplum iliskisi" },
+      { id: "r2", title: "The Undercommons", authors: "Fred Moten, Stefano Harney", year: "2013", type: "book", status: "reading", tags: ["akademi", "elestiri"], updatedAt: now - 2 * 24 * 60 * 60 * 1000 },
+      { id: "r3", title: "Institutional Ethnography", authors: "Dorothy Smith", year: "2005", type: "book", status: "reading", tags: ["metodoloji", "etnografi"], updatedAt: now - 1 * 24 * 60 * 60 * 1000 },
+      { id: "r4", title: "Writing Culture", authors: "Clifford, Marcus", year: "1986", type: "book", status: "to_read", tags: ["etnografi", "yazim"], updatedAt: now },
+      { id: "r5", title: "Actor-Network Theory", authors: "Bruno Latour", year: "2005", type: "article", status: "done", tags: ["teori", "ANT"], updatedAt: now - 10 * 24 * 60 * 60 * 1000 },
+    ];
+
+    // Demo Oturumlar (son 30 gun)
+    const mkSession = (daysAgo: number, startH: number, startM: number, durMin: number, categoryId: string, label: string, projectId?: string, chapterId?: string, sourceId?: string, topicId?: string) => {
       const d = new Date(now);
       d.setDate(d.getDate() - daysAgo);
       d.setHours(startH, startM, 0, 0);
       const start = d.getTime();
       const end = start + durMin * 60_000;
       const pausedMs = durMin >= 60 ? 5 * 60_000 : 0;
-      const s: Session = {
-        id: uid(),
-        categoryId,
-        label,
-        start,
-        end,
-        pausedMs,
-      };
+      const s: Session = { id: uid(), categoryId, label, start, end, pausedMs, projectId, chapterId, sourceId, topicId };
       return s;
     };
+
     const demoSessions: Session[] = [
-      mk(0, 9, 10, 65, "reading", "Graeber – Debt (Ch. 5)"),
-      mk(0, 11, 0, 50, "notes", "Not çıkarma + alıntı fişi"),
-      mk(0, 14, 20, 80, "writing", "Tez bölümü taslağı"),
-      mk(1, 10, 0, 45, "reading", "Moten – Undercommons (pp. 20–35)"),
-      mk(1, 16, 10, 70, "phd", "Literatür haritalama"),
-      mk(2, 9, 40, 40, "admin", "E-posta + planlama"),
-      mk(2, 13, 30, 90, "reading", "Institutional Ethnography makale"),
-      mk(3, 10, 15, 60, "writing", "Metin revizyonu"),
-      mk(5, 9, 0, 75, "phd", "Tez: araştırma soruları"),
-      mk(7, 15, 0, 55, "reading", "Favret-Saada notları"),
+      // Bugun
+      mkSession(0, 9, 0, 75, "reading", "Literatur okumasi", "demo-thesis", "ch2", "r3", "topic-theory"),
+      mkSession(0, 11, 0, 45, "notes", "Not cikarmak", "demo-thesis", "ch2"),
+      mkSession(0, 14, 30, 90, "writing", "Tez yazimi", "demo-thesis", "ch3"),
+      // Dun
+      mkSession(1, 10, 0, 60, "reading", "Graeber okumasi", "demo-thesis", "ch2", "r1"),
+      mkSession(1, 14, 0, 80, "thesis", "Metodoloji taslagi", "demo-thesis", "ch3", undefined, "topic-method"),
+      // 2 gun once
+      mkSession(2, 9, 30, 50, "reading", "Moten & Harney", "demo-thesis", undefined, "r2"),
+      mkSession(2, 15, 0, 70, "writing", "Makale revizyonu", "demo-article", "art1"),
+      // 3 gun once
+      mkSession(3, 10, 0, 45, "admin", "E-posta ve planlama"),
+      mkSession(3, 13, 30, 90, "thesis", "Literatur haritalama", "demo-thesis", "ch2"),
+      // 5 gun once
+      mkSession(5, 9, 0, 65, "writing", "Giris bolumu", "demo-thesis", "ch1"),
+      mkSession(5, 14, 0, 55, "reading", "Latour ANT", undefined, undefined, "r5", "topic-theory"),
+      // 7 gun once
+      mkSession(7, 10, 15, 80, "thesis", "Arastirma sorusu taslagi", "demo-thesis", "ch1"),
+      mkSession(7, 16, 0, 40, "notes", "Zotero duzenleme"),
+      // 14 gun once
+      mkSession(14, 9, 0, 120, "thesis", "Tez toplantisi hazirlik", "demo-thesis"),
+      mkSession(14, 14, 30, 60, "reading", "Smith - IE", undefined, undefined, "r3", "topic-method"),
+      // 21 gun once
+      mkSession(21, 10, 0, 90, "writing", "Makale ilk taslak", "demo-article", "art1"),
+      mkSession(21, 15, 30, 45, "admin", "Konferans basvurusu"),
     ].sort((a, b) => b.start - a.start);
 
-    setCategories(demoCats);
-    setSessions(demoSessions);
-    setDailyTarget(3);
-    setLocalUpdatedAt(now);
-    setRunning(null);
-    setQuickCat(demoCats[0].id);
-    setQuickLabel("");
-    toast("success", "Demo veri yüklendi.");
-  };
-
-  const loadHeatmapDemoData = () => {
-    const now = new Date();
-    const start = new Date(now);
-    start.setDate(start.getDate() - 363);
-    start.setHours(0, 0, 0, 0);
-
-    // Eğer hiç kategori yoksa defaultları garantiye al
-    const ensuredCats = (categories?.length ? categories : DEFAULT_CATEGORIES);
-    if (!categories?.length) setCategories(ensuredCats);
-
-    const catIds = ensuredCats.map((c) => c.id);
-
-    // Deterministic-ish random (aynı gün -> benzer dağılım)
-    const seeded = (seed: number) => {
-      let t = seed + 0x6d2b79f5;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-
-    const sessionsToAdd: Session[] = [];
-
-    for (let i = 0; i < 364; i++) {
-      const day = new Date(start);
-      day.setDate(start.getDate() + i);
-
-      const daySeed = day.getTime();
-      const r = seeded(daySeed);
-
-      // Bazı günler boş kalsın (heatmap seviyeleri görünür olsun)
-      // ~%45 gün boş, kalan günler 1-3 oturum
-      if (r < 0.45) continue;
-
-      const sessionCount = r < 0.75 ? 1 : r < 0.92 ? 2 : 3;
-
-      for (let k = 0; k < sessionCount; k++) {
-        const rr = seeded(daySeed + k * 999);
-
-        // Saat: 9-22 arası
-        const startHour = 9 + Math.floor(rr * 14); // 9..22
-        const startMin = [0, 10, 15, 20, 30, 40, 45, 50][Math.floor(seeded(daySeed + k * 77) * 8)];
-
-        // Süre: 20m - 140m arası
-        const durMin = 20 + Math.floor(seeded(daySeed + k * 123) * 120);
-
-        const d0 = new Date(day);
-        d0.setHours(startHour, startMin, 0, 0);
-        const startMs = d0.getTime();
-        const endMs = startMs + durMin * 60_000;
-
-        const categoryId = catIds[Math.floor(seeded(daySeed + k * 555) * catIds.length)] || "other";
-
-        const pausedMs = durMin >= 60 && seeded(daySeed + k * 42) > 0.6 ? 5 * 60_000 : 0;
-
-        sessionsToAdd.push({
-          id: uid(),
-          categoryId,
-          label: "Heatmap demo",
-          start: startMs,
-          end: endMs,
-          pausedMs,
+    // Demo Gunluk Loglar (son 14 gun kelime sayilari)
+    const demoLogs: DailyLog[] = [];
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const wordCount = i === 0 ? 850 : i === 1 ? 1200 : i === 2 ? 0 : i === 5 ? 1500 : i === 7 ? 2100 : i === 14 ? 800 : Math.floor(Math.random() * 600);
+      if (wordCount > 0) {
+        demoLogs.push({
+          date: dateStr,
+          wordCount,
+          projectBreakdown: { "demo-thesis": Math.floor(wordCount * 0.7), "demo-article": Math.floor(wordCount * 0.3) }
         });
       }
     }
 
-    // Yeni veriyi ekle (eskiyi silme)
-    setSessions((prev) => [...(sessionsToAdd), ...(prev ?? [])].sort((a, b) => b.start - a.start));
-    setLocalUpdatedAt(Date.now());
-    toast("success", "Heatmap demo verisi eklendi.");
+    // Demo Milestone'lar
+    const demoMilestones: Milestone[] = [
+      { id: "m1", title: "Literatur taramasi tamamla", date: now + 30 * 24 * 60 * 60 * 1000, done: false },
+      { id: "m2", title: "Metodoloji bolumu teslim", date: now + 60 * 24 * 60 * 60 * 1000, done: false },
+      { id: "m3", title: "Tez taslagi tamamla", date: now + 150 * 24 * 60 * 60 * 1000, done: false },
+      { id: "m4", title: "Makale gonderi", date: now + 28 * 24 * 60 * 60 * 1000, done: false },
+    ];
+
+    // Verileri yukle
+    setProjects(demoProjects);
+    setChapters(demoChapters);
+    setCategories(demoCats);
+    setTopics(demoTopics);
+    setReading(demoReadings);
+    setSessions(demoSessions);
+    setDailyLogs(demoLogs);
+    setMilestones(demoMilestones);
+    setDailyTarget(3);
+    setLocalUpdatedAt(now);
+    setRunning(null);
+    setQuickCat(demoCats[0].id);
+    setSelectedProjectId(demoProjects[0].id);
+    setQuickProjectId(demoProjects[0].id);
+    setQuickLabel("");
+    toast("success", "Demo veri yuklendi! Tum ozellikleri kesfedebilirsiniz.");
   };
 
-  const clearDemoData = () => {
+  const clearAllDemo = () => {
     const now = Date.now();
-    setSessions([]);
+    setProjects([{ id: "default-thesis", title: "Ana Proje", type: "thesis", goal: 50000, createdAt: now }]);
+    setChapters([]);
     setCategories(DEFAULT_CATEGORIES);
+    setTopics([]);
+    setReading([]);
+    setSessions([]);
+    setDailyLogs([]);
+    setMilestones([]);
     setDailyTarget(2);
     setLocalUpdatedAt(now);
     setRunning(null);
+    setSelectedProjectId("default-thesis");
     setQuickCat(DEFAULT_CATEGORIES[0]?.id || "other");
+    setQuickProjectId("none");
     setQuickLabel("");
-    toast("info", "Demo veri temizlendi.");
+    toast("info", "Tum veriler temizlendi.");
   };
+
 
   /** ========= Legend ========= */
   const renderLegend = useCallback(() => {
@@ -3114,7 +1798,7 @@ useEffect(() => {
 
   /** ========= UI: Skeleton Loading ========= */
   const allHydrated = catsHydrated && topicsHydrated && readingHydrated && sessionsHydrated;
-  if (!isMounted ||!allHydrated) {
+  if (!isMounted || !allHydrated) {
     return (
       <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 px-4 py-6">
         <div className="mx-auto max-w-5xl space-y-6">
@@ -3146,6 +1830,13 @@ useEffect(() => {
   return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
       <ToastViewport toasts={toasts} remove={removeToast} onAction={handleToastAction} />
+
+      <ChapterDialog
+        isOpen={!!editingChapter}
+        onOpenChange={(open) => !open && setEditingChapter(null)}
+        initialData={editingChapter}
+        onSave={handleChapterSave}
+      />
 
       {/* Confirm dialogs */}
       <ConfirmDialog
@@ -3188,24 +1879,14 @@ useEffect(() => {
         onConfirm={deleteReadingConfirmed}
       />
       <ConfirmDialog
-        open={confirmLoadHeatmapDemo}
-        onOpenChange={setConfirmLoadHeatmapDemo}
-        title="Aktivite Izgarası için demo veri yüklensin mi?"
-        description="52 haftalık ızgarada günlere yayılmış örnek kayıtlar eklenecek. Mevcut kayıtlar korunur."
-        confirmText="Evet, ekle"
-        cancelText="Vazgeç"
-        onConfirm={loadHeatmapDemoData}
-      />
-
-      <ConfirmDialog
         open={confirmLoadDemoData}
         onOpenChange={setConfirmLoadDemoData}
-        title="Demo verisi yüklensin mi?"
-        description="Mevcut kategoriler ve kayıtlar demo verilerle değiştirilecek. (Geri alınamaz)"
+        title="Kapsamli demo verisi yuklensin mi?"
+        description="Tum ozellikleri iceren demo verisi yuklenecek: Projeler, bolumler, kategoriler, konular, okuma listesi, oturumlar ve daha fazlasi. Mevcut veriler değistirilecek."
         destructive
-        confirmText="Evet, yükle"
-        cancelText="Vazgeç"
-        onConfirm={loadDemoData}
+        confirmText="Evet, yukle"
+        cancelText="Vazgec"
+        onConfirm={loadComprehensiveDemo}
       />
       <div className="mx-auto max-w-5xl px-4 py-6 pb-24 sm:pb-10">
         {/* Dialogs */}
@@ -3217,6 +1898,8 @@ useEffect(() => {
           topics={topics}
           reading={reading}
           sessions={sessions}
+          projects={projects}
+          chapters={chapters}
           onSave={handleSessionSave}
           onQuickAddSource={quickAddSourceFromSessionDialog}
           toast={(type, message, title) => toast(type, message, title)}
@@ -3226,6 +1909,7 @@ useEffect(() => {
           isOpen={readingDialogOpen}
           onOpenChange={setReadingDialogOpen}
           initialData={editingReading}
+          chapters={chapters}
           onSave={(item) => {
             saveReadingItem(item);
             setQuickSourceId(item.id);
@@ -3237,31 +1921,31 @@ useEffect(() => {
           <DialogContent>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
-                <BookOpen className="h-5 w-5 text-red-600" /> 
+                <BookOpen className="h-5 w-5 text-red-600" />
                 Zotero Entegrasyonu
               </DialogTitle>
               <ShadcnDialogDescription>
-                Zotero kütüphanendeki son kaynakları çekmek için API bilgilerini gir. 
+                Zotero kütüphanendeki son kaynakları çekmek için API bilgilerini gir.
                 Bu bilgiler sadece tarayıcında saklanır.
               </ShadcnDialogDescription>
             </DialogHeader>
-            
+
             <div className="space-y-4 py-4">
               <div className="space-y-2">
                 <Label>User ID</Label>
-                <Input 
-                  placeholder="Örn: 1234567" 
-                  value={zoteroUserId} 
-                  onChange={(e) => setZoteroUserId(e.target.value)} 
+                <Input
+                  placeholder="Örn: 1234567"
+                  value={zoteroUserId}
+                  onChange={(e) => setZoteroUserId(e.target.value)}
                 />
               </div>
               <div className="space-y-2">
                 <Label>API Key</Label>
-                <Input 
-                  type="password" 
-                  placeholder="Zotero API Key (gizli)" 
-                  value={zoteroApiKey} 
-                  onChange={(e) => setZoteroApiKey(e.target.value)} 
+                <Input
+                  type="password"
+                  placeholder="Zotero API Key (gizli)"
+                  value={zoteroApiKey}
+                  onChange={(e) => setZoteroApiKey(e.target.value)}
                 />
                 <div className="text-[11px] text-muted-foreground">
                   <a href="https://www.zotero.org/settings/keys" target="_blank" rel="noreferrer" className="underline hover:text-primary">
@@ -3281,15 +1965,119 @@ useEffect(() => {
           </DialogContent>
         </Dialog>
 
+        <WordCountDialog
+          isOpen={wordCountOpen}
+          onOpenChange={setWordCountOpen}
+          initialCount={todayLog?.wordCount || 0}
+          dateStr={new Date().toLocaleDateString("tr-TR")}
+          onSave={handleWordCountSave}
+        />
+
+        <MilestoneDialog
+          isOpen={milestoneOpen}
+          onOpenChange={setMilestoneOpen}
+          onSave={handleAddMilestone}
+        />
+        <ChapterDialog
+          isOpen={isChapterDialogOpen}
+          onOpenChange={setIsChapterDialogOpen}
+          initialData={editingChapter}
+          onSave={handleChapterSave}
+          readingItems={reading}
+        />
+
+        <Dialog open={isNewProjectDialogOpen} onOpenChange={setIsNewProjectDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Yeni Proje Oluştur</DialogTitle>
+              <ShadcnDialogDescription>
+                Tez, makale veya kitap gibi farklı yazma projelerini ayrı ayrı takip et.
+              </ShadcnDialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 py-4">
+              <div className="grid gap-2">
+                <Label>Proje Başlığı</Label>
+                <Input value={newProjectTitle} onChange={e => setNewProjectTitle(e.target.value)} placeholder="Örn: Yapay Zeka Etiği Makalesi" />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-2">
+                  <Label>Tür</Label>
+                  <Select value={newProjectType} onValueChange={(v: any) => setNewProjectType(v)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="thesis">Tez</SelectItem>
+                      <SelectItem value="article">Makale</SelectItem>
+                      <SelectItem value="book">Kitap</SelectItem>
+                      <SelectItem value="other">Diğer</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-2">
+                  <Label>Hedef Kelime</Label>
+                  <Input type="number" value={newProjectGoal} onChange={e => setNewProjectGoal(e.target.value)} />
+                </div>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setIsNewProjectDialogOpen(false)}>İptal</Button>
+              <Button onClick={handleAddProject} disabled={!newProjectTitle.trim()}>Oluştur</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        {/* ----------------------- */}
+
         {/* Header */}
         <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-1">
-            <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
-              <div className="text-primary-foreground p-2 rounded-xl" style={{ backgroundColor: theme.hex }}>
-                <Timer className="h-6 w-6" />
-              </div>
-              Çalışalım
-            </h1>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
+                <div className="text-primary-foreground p-2 rounded-xl" style={{ backgroundColor: theme.hex }}>
+                  <Layout className="h-6 w-6" />
+                </div>
+                Çalışalım
+              </h1>
+
+              {/* Project Selector */}
+              {activeProject && (
+                <div className="flex items-center gap-2 ml-0 sm:ml-4 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+                  <Select
+                    value={activeProject.id}
+                    onValueChange={(val) => {
+                      if (val === "new-project-trigger") {
+                        setIsNewProjectDialogOpen(true);
+                      } else {
+                        setSelectedProjectId(val);
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="h-8 border-0 bg-white dark:bg-slate-950 shadow-sm min-w-[160px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="new-project-trigger" className="text-indigo-600 font-medium focus:text-indigo-700 focus:bg-indigo-50">
+                        <span className="flex items-center gap-2">
+                          <Plus className="h-4 w-4" /> Yeni Proje...
+                        </span>
+                      </SelectItem>
+                      <DropdownMenuSeparator />
+                      {projects.map(p => (
+                        <SelectItem key={p.id} value={p.id}>
+                          <span className="flex items-center gap-2">
+                            {p.type === 'thesis' ? <GraduationCap className="h-4 w-4" /> :
+                              p.type === 'book' ? <Book className="h-4 w-4" /> :
+                                p.type === 'article' ? <FileText className="h-4 w-4" /> :
+                                  <Layout className="h-4 w-4" />}
+                            {p.title}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
 
             <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
               <span className="inline-flex items-center gap-1">
@@ -3423,7 +2211,23 @@ useEffect(() => {
           </div>
         </header>
 
-        {/* Active Timer Card */}
+        {/* Reminder Panel */}
+        <ReminderPanel
+          reminders={reminders}
+          onDismiss={dismissReminder}
+        />
+
+        {/* Thesis Dashboard (Project Specific) */}
+        {activeProject && (
+          <ThesisDashboard
+            dailyLogs={dailyLogs}
+            milestones={milestones}
+            project={activeProject}
+            sessions={sessions}
+          />
+        )}
+
+        {/* Active Timer Card (Moved Up) */}
         <div className="mb-8">
           {!running ? (
             <Card className="border-dashed border-2 bg-slate-50/50 dark:bg-slate-900/20 shadow-none hover:bg-slate-50 transition-colors">
@@ -3459,6 +2263,23 @@ useEffect(() => {
                         {topics.map((t) => (
                           <SelectItem key={t.id} value={t.id}>
                             {t.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs font-semibold uppercase text-muted-foreground">Proje</Label>
+                    <Select value={quickProjectId} onValueChange={setQuickProjectId}>
+                      <SelectTrigger className="h-12 bg-white dark:bg-slate-950 border-slate-200">
+                        <SelectValue placeholder="(opsiyonel) Proje sec" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">(Secme)</SelectItem>
+                        {projects.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.title}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -3569,13 +2390,42 @@ useEffect(() => {
               categoryMap={categoryMap}
               topicMap={topicMap}
               readingMap={readingMap}
+              projectMap={projectMap}
               themeColor={theme.hex}
             />
           )}
         </div>
 
+        {/* Chapter Progress (Project Specific) */}
+        <section className="mt-8 mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <BookOpen className="h-5 w-5 text-indigo-500" />
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                {activeProject ? `${activeProject.title} Bölümleri` : "Bölüm İlerlemesi"}
+              </h2>
+            </div>
+            <Button size="sm" onClick={() => { setEditingChapter(null); setIsChapterDialogOpen(true); }}>
+              <Plus className="h-4 w-4 mr-1" /> Yeni Bölüm
+            </Button>
+          </div>
+          <ChapterBoard
+            chapters={filteredChapters}
+            onUpdateChapter={handleChapterSave}
+            onChapterClick={(c) => { setEditingChapter(c); setIsChapterDialogOpen(true); }}
+            onDeleteChapter={(id) => {
+              setChapters(prev => prev.filter(c => c.id !== id));
+              setLocalUpdatedAt(Date.now());
+            }}
+          />
+        </section>
+
+
+
         {/* KPI Row */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        {/* --- GÜNCELLENMİŞ KPI ROW --- */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          {/* 1. KART: Bugün (Kelime Sayısı Eklendi) */}
           <Card className="shadow-sm">
             <CardHeader className="pb-2">
               <CardTitle className="text-base font-medium flex items-center gap-2">
@@ -3587,15 +2437,28 @@ useEffect(() => {
                 <div className="text-3xl font-bold">{todayHuman}</div>
                 <div className="text-xs text-muted-foreground">{targetHuman} hedef</div>
               </div>
-
               <div className="mt-3 h-2.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                 <div className="h-full transition-all duration-700 ease-out" style={{ width: `${progressPercent}%`, backgroundColor: theme.hex }} />
               </div>
 
-              <p className="text-xs text-muted-foreground mt-3">{progressPercent >= 100 ? "Harika! Hedef tamam 🎉" : "Hedefe ulaşmak için devam."}</p>
+              <Separator className="my-3" />
+
+              {/* Kelime Sayısı Alanı */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xl font-bold flex items-center gap-1">
+                    {todayLog?.wordCount || 0}
+                    <span className="text-xs font-normal text-muted-foreground">kelime</span>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setWordCountOpen(true)}>
+                  <Pencil className="h-3 w-3 mr-1" /> Gir
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
+          {/* 2. KART: Bu Hafta (Aynı Kaldı) */}
           <Card className="shadow-sm">
             <CardHeader className="pb-2">
               <CardTitle className="text-base font-medium flex items-center gap-2">
@@ -3605,8 +2468,21 @@ useEffect(() => {
             <CardContent>
               <div className="text-3xl font-bold">{weekHuman}</div>
               <div className="text-xs text-muted-foreground mt-1">Haftalık toplam çalışma süresi</div>
+              <div className="mt-4 text-xs text-muted-foreground">
+                Toplam Yazılan: <span className="font-semibold text-foreground">{dailyLogs.reduce((acc, l) => acc + l.wordCount, 0)}</span> kelime
+              </div>
             </CardContent>
           </Card>
+
+          {/* 3. KART: YENİ Milestone Widget */}
+          <div className="md:col-span-1">
+            <div className="flex justify-end mb-1">
+              <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => setMilestoneOpen(true)}>
+                <Plus className="h-3 w-3 mr-1" /> Hedef Ekle
+              </Button>
+            </div>
+            <MilestonesWidget milestones={milestones} onDelete={deleteMilestone} onToggle={toggleMilestone} />
+          </div>
         </div>
 
         {/* Main Tabs */}
@@ -3889,32 +2765,32 @@ useEffect(() => {
                       <Plus className="mr-2 h-4 w-4" /> Kaynak Ekle
                     </Button>
                     {/* Mevcut "Kaynak Ekle" butonu burada... onun yanına veya soluna: */}
-                    
+
                     {/* "Kaynak Ekle" butonunun yanı... */}
 
                     {/* .bib Yükle Butonu (BUNU EKLE) */}
-                    <Button 
-                      variant="outline" 
-                      className="rounded-xl gap-2 text-slate-700 dark:text-slate-200" 
+                    <Button
+                      variant="outline"
+                      className="rounded-xl gap-2 text-slate-700 dark:text-slate-200"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={isImportingBib}
                     >
-                      {isImportingBib ? <Loader2 className="h-4 w-4 animate-spin"/> : <Database className="h-4 w-4 text-orange-600" />}
+                      {isImportingBib ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4 text-orange-600" />}
                       {isImportingBib ? "Yükleniyor..." : ".bib Yükle"}
                     </Button>
 
                     {/* Gizli Input (BUNU EKLE) */}
-                    <input 
-                      type="file" 
-                      ref={fileInputRef} 
-                      className="hidden" 
-                      accept=".bib,.txt" 
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      className="hidden"
+                      accept=".bib,.txt"
                       onChange={handleBibtexFileChange}
                     />
 
                     <Button variant="outline" className="rounded-xl gap-2 text-slate-700 dark:text-slate-200" onClick={() => setZoteroDialogOpen(true)}>
                       {/* Zotero iconu yerine BookOpen kullanıp kırmızı yapıyoruz */}
-                      <BookOpen className="h-4 w-4 text-red-600" /> 
+                      <BookOpen className="h-4 w-4 text-red-600" />
                       Zotero
                     </Button>
 
@@ -4002,6 +2878,12 @@ useEffect(() => {
 
           {/* Analysis */}
           <TabsContent value="analysis" className="mt-6 space-y-6">
+            <WritingAnalytics
+              dailyLogs={dailyLogs}
+              sessions={sessions}
+              categories={categories}
+              selectedProject={activeProject}
+            />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <Card className="shadow-sm md:col-span-1">
                 <CardHeader className="pb-2">
@@ -4098,6 +2980,85 @@ useEffect(() => {
                         <Area type="monotone" dataKey="saat" stroke={theme.hex} fillOpacity={1} fill="url(#monthGrad)" />
                       </AreaChart>
                     </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
+              {/* --- YENİ: KELİME SAYISI ANALİZİ KARTI --- */}
+              <Card className="shadow-sm border-l-4 border-l-emerald-500 md:col-span-3">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base font-medium flex items-center gap-2">
+                    <Pencil className="h-4 w-4 text-emerald-600" /> Yazma Performansı (Kelime)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-6">
+
+                  {/* Özet Kutuları */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="p-3 bg-emerald-50/50 dark:bg-emerald-900/10 rounded-xl border border-emerald-100 dark:border-emerald-900/20">
+                      <div className="text-xs text-muted-foreground uppercase font-semibold">Son 7 Gün</div>
+                      <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+                        {wordChartData.dailyTotalWords.toLocaleString("tr-TR")} <span className="text-sm font-normal text-muted-foreground">kelime</span>
+                      </div>
+                    </div>
+                    <div className="p-3 bg-emerald-50/50 dark:bg-emerald-900/10 rounded-xl border border-emerald-100 dark:border-emerald-900/20">
+                      <div className="text-xs text-muted-foreground uppercase font-semibold">Son 4 Hafta</div>
+                      <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+                        {wordChartData.weeklyTotalWords.toLocaleString("tr-TR")} <span className="text-sm font-normal text-muted-foreground">kelime</span>
+                      </div>
+                    </div>
+                    <div className="p-3 bg-emerald-50/50 dark:bg-emerald-900/10 rounded-xl border border-emerald-100 dark:border-emerald-900/20">
+                      <div className="text-xs text-muted-foreground uppercase font-semibold">Son 6 Ay</div>
+                      <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+                        {wordChartData.monthlyTotalWords.toLocaleString("tr-TR")} <span className="text-sm font-normal text-muted-foreground">kelime</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Grafikler */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+                    {/* Günlük Grafik */}
+                    <div className="h-[220px] w-full border rounded-xl p-2 bg-slate-50/30 dark:bg-slate-900/30">
+                      <div className="text-[10px] font-semibold text-center mb-2 text-muted-foreground uppercase tracking-widest">Günlük Dağılım</div>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={wordChartData.daily}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+                          <XAxis dataKey="name" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} dy={5} />
+                          <Tooltip
+                            cursor={{ fill: 'transparent' }}
+                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)' }}
+                            itemStyle={{ color: '#10b981', fontWeight: 'bold' }}
+                            formatter={(value: any) => [`${value} kelime`, "Yazılan"]}
+                            labelFormatter={(l, p) => p?.[0]?.payload?.fullDate || l}
+                          />
+                          <Bar dataKey="words" fill="#10b981" radius={[4, 4, 0, 0]} barSize={24} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* Aylık Grafik */}
+                    <div className="h-[220px] w-full border rounded-xl p-2 bg-slate-50/30 dark:bg-slate-900/30">
+                      <div className="text-[10px] font-semibold text-center mb-2 text-muted-foreground uppercase tracking-widest">Aylık İlerleme</div>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={wordChartData.monthly}>
+                          <defs>
+                            <linearGradient id="wordGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                              <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+                          <XAxis dataKey="name" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} dy={5} />
+                          <Tooltip
+                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)' }}
+                            itemStyle={{ color: '#10b981', fontWeight: 'bold' }}
+                            formatter={(value: any) => [`${value} kelime`, "Toplam"]}
+                          />
+                          <Area type="monotone" dataKey="words" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#wordGrad)" />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+
                   </div>
                 </CardContent>
               </Card>
@@ -4220,33 +3181,90 @@ useEffect(() => {
               {/* Data */}
               <Card className="shadow-sm">
                 <CardHeader>
-                  <CardTitle className="text-base">Veri</CardTitle>
+                  <CardTitle className="text-base">Veri Yönetimi</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <Button variant="outline" className="w-full justify-start" onClick={handleExportCSV} type="button">
-                    <Download className="mr-2 h-4 w-4" /> Filtreli kayıtları CSV indir
-                  </Button>
+                  {/* Export Section */}
+                  <div className="space-y-3">
+                    <div className="text-sm font-medium">Dışa Aktarma</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <Button
+                        variant="outline"
+                        className="justify-start"
+                        onClick={() => {
+                          import("@/lib/export").then(({ exportToJSON, downloadFile, generateFilename }) => {
+                            const json = exportToJSON({
+                              categories,
+                              topics,
+                              reading,
+                              sessions,
+                              dailyLogs,
+                              milestones,
+                              chapters,
+                              projects
+                            });
+                            downloadFile(json, generateFilename("zaman-takip", "json"), "application/json");
+                            toast("success", "Tüm veriler JSON olarak indirildi.");
+                          });
+                        }}
+                        type="button"
+                      >
+                        <Download className="mr-2 h-4 w-4" /> Tüm Veriyi İndir (JSON)
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        className="justify-start"
+                        onClick={() => {
+                          import("@/lib/export").then(({ exportSessionsToCSV, downloadFile, generateFilename }) => {
+                            const csv = exportSessionsToCSV(sessions, categoryMap, topicMap);
+                            downloadFile(csv, generateFilename("oturumlar", "csv"), "text/csv");
+                            toast("success", "Oturumlar CSV olarak indirildi.");
+                          });
+                        }}
+                        type="button"
+                      >
+                        <Download className="mr-2 h-4 w-4" /> Oturumları İndir (CSV)
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        className="justify-start"
+                        onClick={() => {
+                          import("@/lib/export").then(({ exportDailyLogsToCSV, downloadFile, generateFilename }) => {
+                            const csv = exportDailyLogsToCSV(dailyLogs);
+                            downloadFile(csv, generateFilename("kelime-sayilari", "csv"), "text/csv");
+                            toast("success", "Kelime sayıları CSV olarak indirildi.");
+                          });
+                        }}
+                        type="button"
+                      >
+                        <Download className="mr-2 h-4 w-4" /> Kelime Sayıları (CSV)
+                      </Button>
+
+                      <Button variant="outline" className="justify-start" onClick={handleExportCSV} type="button">
+                        <Download className="mr-2 h-4 w-4" /> Filtreli Kayıtlar (CSV)
+                      </Button>
+                    </div>
+                  </div>
 
                   <Separator />
 
-                  <Separator className="my-3" />
-
-                  <Button variant="outline" className="w-full justify-start" onClick={() => setConfirmLoadDemoData(true)} type="button">
-                    Demo veriyi yükle
-                  </Button>
-
-                  <Button variant="outline" className="w-full justify-start" onClick={clearDemoData} type="button">
-                    Demo veriyi temizle
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    className="rounded-xl"
-                    onClick={() => setConfirmLoadHeatmapDemo(true)}
-                    type="button"
-                  >
-                    Aktivite Izgarası için demo ekle
-                  </Button>
+                  {/* Demo Data Section */}
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium">Demo Veri</div>
+                    <div className="text-xs text-muted-foreground mb-2">
+                      Kapsamli demo ile tum ozellikleri kesfedebilirsiniz.
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setConfirmLoadDemoData(true)} type="button">
+                        Demo Yukle
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={clearAllDemo} type="button">
+                        Tumunu Temizle
+                      </Button>
+                    </div>
+                  </div>
 
                   <div className="space-y-2">
                     <div className="text-sm font-medium">Sıfırlama</div>
@@ -4308,6 +3326,7 @@ useEffect(() => {
           </div>
         </div>
       </footer>
+      <Scratchpad />
     </div>
   );
 }
